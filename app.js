@@ -2,7 +2,19 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
+const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
+const COPD_MODEL = 'Lung-COPD';
+const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
+const BASE_MEDIUM = [            // per 10 mL
+  ['Pneumacult BM', 9530], ['100x supplement', 100], ['Heparin', 20], ['Hydrocortisone', 50], ['PS', 100], ['ACA', 200],
+];
+const BASE_MEDIUM_TOTAL = BASE_MEDIUM.reduce((s, r) => s + r[1], 0);
+const WAVELENGTHS = [405, 477, 545, 637];
+const CONC_UNITS = {
+  'M': ['mol', 1], 'mM': ['mol', 1e-3], 'µM': ['mol', 1e-6], 'nM': ['mol', 1e-9], 'pM': ['mol', 1e-12],
+  'mg/mL': ['mass', 1e-3], 'µg/mL': ['mass', 1e-6], 'ng/mL': ['mass', 1e-9], '%': ['pct', 1e-2], '×': ['x', 1],
+};
 const PHOTO_MAX = 1024;          // longest side in px
 const PHOTO_QUALITY = 0.8;       // JPEG quality
 const EXP_STATUS = ['Planned', 'Running', 'Finished'];
@@ -157,6 +169,8 @@ async function route() {
     if (p[0] === 'exp' && p.length === 2) return await viewExperiment(p[1]);
     if (p[0] === 'exp' && p[2] === 'chip' && p[4] === 'ch') return await viewChamber(p[1], p[3], +p[5]);
     if (p[0] === 'exp' && p[2] === 'day') return await viewDay(p[1], +p[3]);
+    if (p[0] === 'exp' && p[2] === 'medium') return await viewMedium(p[1], p[3]);
+    if (p[0] === 'exp' && p[2] === 'stain') return await viewStaining(p[1], p[3]);
     if (p[0] === 'storage') return await viewStorage();
     if (p[0] === 'item') return await viewItem(p[1]);
     if (p[0] === 'settings') return await viewSettings();
@@ -195,6 +209,7 @@ function expCard(e, chips) {
   return `<a class="card exp-card" href="#/exp/${e.id}">
     <div class="row"><span class="expnum">${expNum(e)}</span><span class="title">${esc(e.title || 'Untitled')}</span>
       <span class="badge st-${e.status.toLowerCase()}">${e.status}</span></div>
+    ${e.model ? `<div class="meta"><span class="tag model">${esc(e.model)}</span></div>` : ''}
     <div class="meta">${e.seedingDate ? `Seeded ${fmtDate(e.seedingDate)}${e.status !== 'Finished' ? ` · <b>Day ${day}</b>` : ''}` : 'No seeding date'}${e.protocol ? ' · ' + esc(e.protocol) : ''}</div>
     <div class="meta">${chips.length} chip${chips.length === 1 ? '' : 's'} · ${ch.length} chambers${low ? ` · <span class="dot low"></span>${low} low` : ''}${failed ? ` · <span class="dot failed"></span>${failed} failed` : ''}</div>
   </a>`;
@@ -205,14 +220,17 @@ async function newExperiment() {
   const r = await dialog({
     title: `New experiment #${pad2(num)}`,
     body: `<label>Title / short description<input name="title" placeholder="e.g. Cardiac chips – donor 3"></label>
+      <label>Model<select name="model" required>${modelOptions(await getModels(), '')}</select></label>
       <div class="grid2"><label>Seeding date<input type="date" name="seedingDate" value="${todayISO()}"></label>
       <label>Status<select name="status">${EXP_STATUS.map(s => `<option ${s === 'Running' ? 'selected' : ''}>${s}</option>`).join('')}</select></label></div>
       <label>Protocol<input name="protocol"></label>`,
     actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Create', value: 'ok', cls: 'primary' }],
+    onMount: d => bindModelSelect($('[name=model]', d)),
   });
   if (!r.ok) return;
-  const e = { id: uid(), number: num, title: r.data.title.trim(), seedingDate: r.data.seedingDate, status: r.data.status,
-    protocol: r.data.protocol.trim(), cellsHarvested: '', notes: '', createdAt: now(), updatedAt: now() };
+  const e = { id: uid(), number: num, title: r.data.title.trim(), model: r.data.model, seedingDate: r.data.seedingDate, status: r.data.status,
+    protocol: r.data.protocol.trim(), cellsHarvested: '', notes: '', conditions: [], drugs: [], mediumChanges: [], stainings: [],
+    createdAt: now(), updatedAt: now() };
   await put('experiments', e);
   go('#/exp/' + e.id);
 }
@@ -223,8 +241,10 @@ async function newExperiment() {
 async function viewExperiment(id) {
   const e = await get('experiments', id);
   if (!e) return go('#/');
-  const [chips, photos, movs, items] = await Promise.all([all('chips', 'expId', id), all('photos', 'expId', id), all('movements', 'expId', id), all('items')]);
+  const [chips, photos, movs, items, models] = await Promise.all([all('chips', 'expId', id), all('photos', 'expId', id), all('movements', 'expId', id), all('items'), getModels()]);
   chips.sort((a, b) => a.idx - b.idx);
+  await ensureExpShape(e, chips);
+  const copd = e.model === COPD_MODEL;
   setHeader(`${expNum(e)} ${e.title || ''}`, {
     back: '#/',
     actions: `<button class="icon" id="expExport" title="Export experiment">${I.download}</button>
@@ -239,15 +259,18 @@ async function viewExperiment(id) {
   const itemMap = Object.fromEntries(items.map(i => [i.id, i]));
   const used = {};
   for (const m of movs) { if (m.delta >= 0) continue; const u = (used[m.itemId] ||= { total: 0, n: 0 }); u.total += -m.delta; u.n++; }
+  const mcs = [...e.mediumChanges].sort((a, b) => b.date.localeCompare(a.date) || b.savedAt - a.savedAt);
+  const sts = [...e.stainings].sort((a, b) => b.date.localeCompare(a.date) || b.savedAt - a.savedAt);
 
   main.innerHTML = `
   <section class="card" id="info">
     <div class="grid2">
       <label class="span2">Title<input name="title" value="${esc(e.title)}"></label>
+      <label>Model<select name="model">${modelOptions(models, e.model)}</select></label>
       <label>Status<select name="status">${EXP_STATUS.map(s => `<option ${s === e.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
       <label>Seeding date<input type="date" name="seedingDate" value="${esc(e.seedingDate)}"></label>
       <label>Protocol<input name="protocol" value="${esc(e.protocol)}"></label>
-      <label>Cells harvested<input name="cellsHarvested" value="${esc(e.cellsHarvested)}" placeholder="e.g. 2.4 × 10⁶"></label>
+      <label class="span2">Cells harvested<input name="cellsHarvested" value="${esc(e.cellsHarvested)}" placeholder="e.g. 2.4 × 10⁶"></label>
     </div>
     <div class="stats">
       <div><b>${today ?? '–'}</b><span>Day</span></div>
@@ -262,6 +285,28 @@ async function viewExperiment(id) {
   ${chips.length ? `<div class="chips">${chips.map(c => chipCard(e, c, latest)).join('')}</div>`
     : `<div class="card empty">No chips yet. Tap <b>Add chip</b> – chips are named A, B, C… with 3 chambers each.</div>`}
 
+  <div class="sec-head"><h2>Conditions</h2><button class="btn" id="addCond">${I.plus} Condition</button></div>
+  <div class="card">${e.conditions.length ? e.conditions.map(c => {
+    const n = chips.filter(x => x.conditionId === c.id).length;
+    return `<button class="used rowbtn" data-cond="${c.id}"><span><b>${esc(c.name)}</b>${copd ? ` <span class="muted">${esc(condDesc(e, c))}</span>` : ''}</span><span class="muted">${n} chip${n === 1 ? '' : 's'}</span></button>`;
+  }).join('') : `<div class="muted">No conditions yet.${copd ? ' For COPD, define each condition with CSE and/or drugs – they drive the medium-change calculation.' : ''}</div>`}</div>
+
+  ${copd ? `<div class="sec-head"><h2>Drugs</h2><button class="btn" id="addDrug">${I.plus} Drug</button></div>
+  <div class="card">${e.drugs.length ? e.drugs.map(d => `<button class="used rowbtn" data-drug="${d.id}"><span><b>${esc(d.name)}</b></span><span class="muted">${esc(drugDesc(d))}</span></button>`).join('')
+    : '<div class="muted">No drugs yet. Add each drug with its dilution (ratio 1:X, or stock → final concentration).</div>'}</div>
+
+  <div class="sec-head"><h2>Medium changes</h2><a class="btn primary" href="#/exp/${id}/medium/new">${I.plus} New medium change</a></div>
+  <div class="card">${mcs.length ? mcs.map(m => `<a class="used" href="#/exp/${id}/medium/${m.id}"><span><b>${m.day != null ? 'Day ' + m.day : ''}</b> ${fmtDate(m.date)}</span>
+      <span class="muted">Abs ${m.absorbance ?? '–'} · CSE ${m.cseFraction ? fmtN(m.cseFraction * 100) + '%' : '–'}</span></a>`).join('')
+    : '<div class="muted">No medium changes recorded yet.</div>'}</div>` : ''}
+
+  <div class="sec-head"><h2>Stainings</h2><a class="btn primary" href="#/exp/${id}/stain/new">${I.plus} New staining</a></div>
+  <div class="card">${sts.length ? sts.map(s => {
+    const img = WAVELENGTHS.some(w => s.imaging?.[w]?.laser || s.imaging?.[w]?.exposure);
+    return `<a class="used" href="#/exp/${id}/stain/${s.id}"><span><b>${esc(s.title || 'Staining')}</b> <span class="muted">${s.day != null ? 'Day ' + s.day + ' · ' : ''}${fmtDate(s.date)} · ${s.nChambers} ch.</span></span>
+      ${img ? '<span class="tag ok">Imaging ✓</span>' : '<span class="tag soon">Imaging to fill</span>'}</a>`;
+  }).join('') : '<div class="muted">No stainings yet.</div>'}</div>
+
   ${days.length ? `<div class="sec-head"><h2>Photos by day</h2></div>
     <div class="pills">${days.map(d => `<a class="pill" href="#/exp/${id}/day/${d}">Day ${d}</a>`).join('')}</div>` : ''}
 
@@ -272,13 +317,17 @@ async function viewExperiment(id) {
   }).join('') : '<div class="muted">Nothing yet. When you remove something in Storage, pick this experiment to link it here.</div>'}</div>`;
 
   // autosave main info
-  $$('#info [name]').forEach(el => el.addEventListener('change', async () => {
-    e[el.name] = el.value.trim(); e.updatedAt = now();
-    await put('experiments', e);
+  $$('#info [name]:not([name=model])').forEach(el => el.addEventListener('change', async () => {
+    e[el.name] = el.value.trim(); await saveExp(e);
     if (['title', 'seedingDate', 'status'].includes(el.name)) rerender(); else toast('Saved');
   }));
+  bindModelSelect($('#info [name=model]'), async m => { e.model = m; await saveExp(e); toast('Model: ' + m); rerender(); });
   $('#addChip').onclick = () => addChips(e, chips);
-  $$('[data-editchip]').forEach(b => b.onclick = () => editChip(chips.find(c => c.id === b.dataset.editchip)));
+  $$('[data-editchip]').forEach(b => b.onclick = () => editChip(e, chips.find(c => c.id === b.dataset.editchip)));
+  $('#addCond').onclick = async () => { if (await condDialog(e, null)) rerender(); };
+  $$('[data-cond]').forEach(b => b.onclick = async () => { if (await condDialog(e, e.conditions.find(c => c.id === b.dataset.cond))) rerender(); });
+  $('#addDrug') && ($('#addDrug').onclick = async () => { if (await drugDialog(e, null)) rerender(); });
+  $$('[data-drug]').forEach(b => b.onclick = async () => { if (await drugDialog(e, e.drugs.find(d => d.id === b.dataset.drug))) rerender(); });
   $('#expExport').onclick = () => exportExperiment(id);
   $('#expDelete').onclick = async () => {
     if (!await confirmDlg('Delete experiment?', `${expNum(e)} ${esc(e.title)} with all its chips and ${photos.length} photos will be permanently deleted from this device. Consider exporting it first.`, 'Delete', 'danger')) return;
@@ -286,9 +335,10 @@ async function viewExperiment(id) {
   };
 }
 function chipCard(e, c, latest) {
+  const cn = condName(e, c);
   return `<div class="card">
     <div class="chip-head"><span class="chip-letter">${c.letter}</span>
-      <span class="cond">${c.condition ? esc(c.condition) : '<span class="muted">No condition set</span>'}</span>
+      <span class="cond">${cn ? esc(cn) : '<span class="muted">No condition set</span>'}</span>
       <button class="icon sm" data-editchip="${c.id}" title="Edit chip">${I.edit}</button></div>
     <div class="chambers">${c.chambers.map((ch, i) => {
       const n = i + 1, p = latest[c.id + '_' + n];
@@ -310,19 +360,21 @@ async function addChips(e, chips) {
     title: 'Add chip',
     body: `<label>How many chips?<input type="number" name="n" min="1" max="52" value="1" inputmode="numeric" required></label>
       <p class="muted" id="namesPrev"></p>
-      <label>Condition / treatment (optional)<input name="condition" placeholder="e.g. Control, 10 µM drug X"></label>`,
+      <label>Condition<select name="cond">${condOptions(e, '')}</select></label>`,
     actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Add', value: 'ok', cls: 'primary' }],
     onMount: d => {
       const inp = $('[name=n]', d);
       const upd = () => { const n = Math.max(1, Math.min(52, +inp.value || 1)); $('#namesPrev', d).textContent = 'Will be named: ' + Array.from({ length: n }, (_, i) => letters(next + i)).join(', '); };
       inp.addEventListener('input', upd); upd();
+      bindCondSelect($('[name=cond]', d), e);
     },
   });
   if (!r.ok) return;
   const n = Math.max(1, Math.min(52, +r.data.n || 1));
+  const cond = e.conditions.find(c => c.id === r.data.cond);
   await tx(['chips', 'experiments'], 'readwrite', t => {
     for (let i = 0; i < n; i++) {
-      t.objectStore('chips').put({ id: uid(), expId: e.id, idx: next + i, letter: letters(next + i), condition: r.data.condition.trim(), notes: '',
+      t.objectStore('chips').put({ id: uid(), expId: e.id, idx: next + i, letter: letters(next + i), conditionId: cond?.id || null, condition: cond?.name || '', notes: '',
         chambers: [newChamber(), newChamber(), newChamber()], createdAt: now(), updatedAt: now() });
     }
     e.updatedAt = now(); t.objectStore('experiments').put(e);
@@ -330,12 +382,13 @@ async function addChips(e, chips) {
   toast(n === 1 ? `Chip ${letters(next)} added` : `${n} chips added`);
   rerender();
 }
-async function editChip(c) {
+async function editChip(e, c) {
   const r = await dialog({
     title: `Chip ${c.letter}`,
-    body: `<label>Condition / treatment<input name="condition" value="${esc(c.condition)}"></label>
+    body: `<label>Condition<select name="cond">${condOptions(e, c.conditionId)}</select></label>
       <label>Notes<textarea name="notes" rows="3">${esc(c.notes)}</textarea></label>`,
     actions: [{ label: 'Delete chip', value: 'delete', cls: 'danger', novalidate: true }, { label: 'Cancel', value: 'cancel' }, { label: 'Save', value: 'ok', cls: 'primary' }],
+    onMount: d => bindCondSelect($('[name=cond]', d), e),
   });
   if (r.action === 'delete') {
     if (!await confirmDlg(`Delete chip ${c.letter}?`, 'The chip, its 3 chambers and all their photos will be permanently deleted.', 'Delete', 'danger')) return;
@@ -347,8 +400,413 @@ async function editChip(c) {
     toast(`Chip ${c.letter} deleted`); return rerender();
   }
   if (!r.ok) return;
-  c.condition = r.data.condition.trim(); c.notes = r.data.notes.trim(); c.updatedAt = now();
+  const cond = e.conditions.find(x => x.id === r.data.cond);
+  c.conditionId = cond?.id || null; c.condition = cond?.name || ''; c.notes = r.data.notes.trim(); c.updatedAt = now();
   await put('chips', c); rerender();
+}
+
+/* ---------------- models, conditions, drugs ---------------- */
+async function saveExp(e) { e.updatedAt = now(); await put('experiments', e); }
+async function getModels() { const m = await get('meta', 'models'); return [...new Set([...MODELS, ...(m?.list || [])])]; }
+async function addModel(name) {
+  const m = (await get('meta', 'models')) || { key: 'models', list: [] };
+  if (!m.list.includes(name) && !MODELS.includes(name)) m.list.push(name);
+  await put('meta', m);
+}
+function modelOptions(models, cur) {
+  return `${cur && !models.includes(cur) ? `<option selected>${esc(cur)}</option>` : ''}<option value="" ${!cur ? 'selected' : ''}>— select model —</option>
+    ${models.map(m => `<option ${m === cur ? 'selected' : ''}>${esc(m)}</option>`).join('')}<option value="__new">+ New model…</option>`;
+}
+function bindModelSelect(sel, onPicked) {
+  let prev = sel.value;
+  sel.addEventListener('change', async () => {
+    if (sel.value !== '__new') { prev = sel.value; onPicked && sel.value && onPicked(sel.value); return; }
+    const r = await dialog({ title: 'New model', body: '<label>Model name<input name="name" required placeholder="e.g. Liver-NASH"></label>',
+      actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Add', value: 'ok', cls: 'primary' }] });
+    const n = r.ok ? r.data.name.trim() : '';
+    if (!n) { sel.value = prev; return; }
+    await addModel(n);
+    if (![...sel.options].some(o => o.value === n)) sel.insertBefore(new Option(n, n), sel.lastElementChild);
+    sel.value = n; prev = n; onPicked && onPicked(n);
+  });
+}
+async function ensureExpShape(e, chips) {
+  let dirty = false;
+  for (const k of ['conditions', 'drugs', 'mediumChanges', 'stainings']) if (!Array.isArray(e[k])) { e[k] = []; dirty = true; }
+  const changed = [];
+  for (const c of chips) {
+    if (c.conditionId || !c.condition) continue;
+    let cd = e.conditions.find(x => x.name === c.condition);
+    if (!cd) { cd = { id: uid(), name: c.condition, cse: false, drugIds: [] }; e.conditions.push(cd); dirty = true; }
+    c.conditionId = cd.id; changed.push(c);
+  }
+  if (dirty || changed.length) await tx(['experiments', 'chips'], 'readwrite', t => { t.objectStore('experiments').put(e); changed.forEach(c => t.objectStore('chips').put(c)); });
+}
+const condName = (e, c) => (e.conditions || []).find(x => x.id === c.conditionId)?.name || c.condition || '';
+function condDesc(e, c) {
+  const parts = [];
+  if (c.cse) parts.push('CSE');
+  for (const id of c.drugIds || []) { const d = e.drugs.find(x => x.id === id); if (d) parts.push(d.name); }
+  return parts.length ? parts.join(' + ') : 'medium only';
+}
+function condOptions(e, cur) {
+  return `<option value="">— none —</option>${e.conditions.map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="__new">+ New condition…</option>`;
+}
+function bindCondSelect(sel, e) {
+  let prev = sel.value;
+  sel.addEventListener('change', async () => {
+    if (sel.value !== '__new') { prev = sel.value; return; }
+    const c = await condDialog(e, null);
+    if (!c) { sel.value = prev; return; }
+    sel.insertBefore(new Option(c.name, c.id), sel.lastElementChild);
+    sel.value = c.id; prev = c.id;
+  });
+}
+async function condDialog(e, c) {
+  const isNew = !c, copd = e.model === COPD_MODEL;
+  c = c ? { ...c, drugIds: [...(c.drugIds || [])] } : { id: uid(), name: '', cse: false, drugIds: [] };
+  const r = await dialog({
+    title: isNew ? 'New condition' : 'Edit condition',
+    body: `<label>Name<input name="name" required value="${esc(c.name)}" placeholder="e.g. Ctrl, CSE, CSE + Drug A"></label>
+      ${copd ? `<label class="check"><input type="checkbox" name="cse" ${c.cse ? 'checked' : ''}> CSE</label>
+      <div class="muted" style="font-size:13px;font-weight:600;margin:6px 0">Drugs</div>
+      ${e.drugs.length ? e.drugs.map(d => `<label class="check"><input type="checkbox" name="drug_${d.id}" ${c.drugIds.includes(d.id) ? 'checked' : ''}> ${esc(d.name)} <span class="muted">${esc(drugDesc(d))}</span></label>`).join('')
+        : '<p class="muted">No drugs defined yet – add them in the Drugs section of the experiment.</p>'}` : ''}`,
+    actions: [...(isNew ? [] : [{ label: 'Delete', value: 'delete', cls: 'danger', novalidate: true }]), { label: 'Cancel', value: 'cancel' }, { label: 'Save', value: 'ok', cls: 'primary' }],
+  });
+  if (r.action === 'delete') {
+    const chips = (await all('chips', 'expId', e.id)).filter(x => x.conditionId === c.id);
+    if (!await confirmDlg('Delete condition?', `${esc(c.name)} will be removed${chips.length ? ` and ${chips.length} chip(s) will have no condition` : ''}.`, 'Delete', 'danger')) return null;
+    e.conditions = e.conditions.filter(x => x.id !== c.id);
+    await tx(['experiments', 'chips'], 'readwrite', t => {
+      e.updatedAt = now(); t.objectStore('experiments').put(e);
+      chips.forEach(x => { x.conditionId = null; x.condition = ''; x.updatedAt = now(); t.objectStore('chips').put(x); });
+    });
+    return c;
+  }
+  if (!r.ok) return null;
+  c.name = r.data.name.trim();
+  if (copd) { c.cse = !!r.data.cse; c.drugIds = e.drugs.filter(d => r.data['drug_' + d.id]).map(d => d.id); }
+  const i = e.conditions.findIndex(x => x.id === c.id);
+  if (i < 0) e.conditions.push(c); else e.conditions[i] = c;
+  const chips = isNew ? [] : (await all('chips', 'expId', e.id)).filter(x => x.conditionId === c.id && x.condition !== c.name);
+  await tx(['experiments', 'chips'], 'readwrite', t => {
+    e.updatedAt = now(); t.objectStore('experiments').put(e);
+    chips.forEach(x => { x.condition = c.name; x.updatedAt = now(); t.objectStore('chips').put(x); });
+  });
+  return c;
+}
+const fmtN = x => String(Number(Number(x).toPrecision(4)));
+function fmtUL(v) {
+  if (v == null || !isFinite(v)) return '–';
+  const a = Math.abs(v);
+  return (a === 0 ? '0' : a < 10 ? v.toFixed(2) : a < 100 ? v.toFixed(1) : String(Math.round(v))) + ' µL';
+}
+function parseRatio(s) {
+  s = String(s ?? '').trim().replace(',', '.');
+  const m = s.match(/^1\s*[:/]\s*([\d.]+(?:e[+-]?\d+)?)$/i);
+  const x = m ? parseFloat(m[1]) : parseFloat(s);
+  return x > 0 && isFinite(x) && (m || /^[\d.]+(e[+-]?\d+)?$/i.test(s)) ? x : null;
+}
+function drugFraction(d) {
+  if (!d) return null;
+  if (d.mode === 'conc') {
+    const a = CONC_UNITS[d.stockUnit], b = CONC_UNITS[d.finalUnit];
+    if (!a || !b || a[0] !== b[0]) return null;
+    const st = parseFloat(d.stock) * a[1], fi = parseFloat(d.final) * b[1];
+    if (!(st > 0 && fi > 0) || fi > st) return null;
+    return fi / st;
+  }
+  const x = parseFloat(d.ratio);
+  return x >= 1 ? 1 / x : null;
+}
+function drugDesc(d) {
+  const f = drugFraction(d);
+  const base = d.mode === 'conc' ? `${d.stock} ${d.stockUnit} → ${d.final} ${d.finalUnit}` : `1:${d.ratio}`;
+  return f ? `${base} · ${fmtUL(f * 1000)}/mL` : `${base} – invalid`;
+}
+async function drugDialog(e, d) {
+  const isNew = !d;
+  d = d ? { ...d } : { id: uid(), name: '', mode: 'ratio', ratio: '', stock: '', stockUnit: 'mM', final: '', finalUnit: 'µM' };
+  const unitOpts = cur => Object.keys(CONC_UNITS).map(u => `<option ${u === cur ? 'selected' : ''}>${u}</option>`).join('');
+  const r = await dialog({
+    title: isNew ? 'New drug' : 'Edit drug',
+    body: `<label>Drug name<input name="name" required value="${esc(d.name)}"></label>
+      <div class="seg" id="modeSeg"><button type="button" data-m="ratio">Ratio 1:X</button><button type="button" data-m="conc">Stock → final</button></div>
+      <input type="hidden" name="mode" value="${d.mode}">
+      <div id="mRatio"><label>Dilution<input name="ratio" value="${d.ratio ? '1:' + d.ratio : ''}" placeholder="1:1000"></label></div>
+      <div id="mConc" class="grid2">
+        <label>Stock conc.<input name="stock" type="number" step="any" min="0" inputmode="decimal" value="${esc(d.stock)}"></label><label>Unit<select name="stockUnit">${unitOpts(d.stockUnit)}</select></label>
+        <label>Final conc.<input name="final" type="number" step="any" min="0" inputmode="decimal" value="${esc(d.final)}"></label><label>Unit<select name="finalUnit">${unitOpts(d.finalUnit)}</select></label>
+      </div>
+      <p class="muted" id="drugPrev"></p>`,
+    actions: [...(isNew ? [] : [{ label: 'Delete', value: 'delete', cls: 'danger', novalidate: true }]), { label: 'Cancel', value: 'cancel' }, { label: 'Save', value: 'ok', cls: 'primary' }],
+    onMount: dl => {
+      const f = $('form', dl).elements;
+      const upd = () => {
+        const m = f.mode.value;
+        $$('#modeSeg button', dl).forEach(b => b.classList.toggle('on', b.dataset.m === m));
+        $('#mRatio', dl).hidden = m !== 'ratio'; $('#mConc', dl).hidden = m !== 'conc';
+        const fr = drugFraction({ mode: m, ratio: parseRatio(f.ratio.value), stock: f.stock.value, stockUnit: f.stockUnit.value, final: f.final.value, finalUnit: f.finalUnit.value });
+        $('#drugPrev', dl).textContent = fr ? `= 1:${fmtN(1 / fr)} → ${fmtUL(fr * 1000)} per mL of medium` : 'Enter a valid dilution';
+        f.ratio.setCustomValidity(m === 'ratio' && !fr ? 'Enter a dilution like 1:1000' : '');
+        f.final.setCustomValidity(m === 'conc' && !fr ? 'Units must be compatible and final ≤ stock' : '');
+      };
+      $$('#modeSeg button', dl).forEach(b => b.onclick = () => { f.mode.value = b.dataset.m; upd(); });
+      $('form', dl).addEventListener('input', upd); $('form', dl).addEventListener('change', upd); upd();
+    },
+  });
+  if (r.action === 'delete') {
+    if (!await confirmDlg('Delete drug?', `${esc(d.name)} will be removed from all conditions.`, 'Delete', 'danger')) return false;
+    e.drugs = e.drugs.filter(x => x.id !== d.id);
+    e.conditions.forEach(c => { c.drugIds = (c.drugIds || []).filter(x => x !== d.id); });
+    await saveExp(e); return true;
+  }
+  if (!r.ok) return false;
+  Object.assign(d, { name: r.data.name.trim(), mode: r.data.mode, ratio: parseRatio(r.data.ratio) || '', stock: r.data.stock, stockUnit: r.data.stockUnit, final: r.data.final, finalUnit: r.data.finalUnit });
+  const i = e.drugs.findIndex(x => x.id === d.id);
+  if (i < 0) e.drugs.push(d); else e.drugs[i] = d;
+  await saveExp(e); return true;
+}
+
+/* ---------------- COPD medium change ---------------- */
+async function viewMedium(expId, mid) {
+  const e = await get('experiments', expId);
+  if (!e) return go('#/');
+  const chips = await all('chips', 'expId', expId);
+  await ensureExpShape(e, chips);
+  const isNew = mid === 'new';
+  const mc = isNew ? null : e.mediumChanges.find(m => m.id === mid);
+  if (!isNew && !mc) return go('#/exp/' + expId);
+  const conds = e.conditions;
+  const activeChips = cid => chips.filter(c => c.conditionId === cid && c.chambers.some(ch => ch.status !== 'failed')).length;
+  const st = mc || { date: todayISO(), absorbance: '', volPerChip: 1, counts: {}, notes: '' };
+  const count = cid => st.counts?.[cid] ?? activeChips(cid);
+  setHeader(isNew ? 'New medium change' : 'Medium change', { back: '#/exp/' + expId });
+  main.innerHTML = `
+  ${e.model !== COPD_MODEL ? '<div class="warn">This experiment is not set to the Lung-COPD model.</div>' : ''}
+  ${!conds.length ? '<div class="warn">No conditions defined. Add conditions (with CSE / drugs) on the experiment page first.</div>' : ''}
+  <form class="card" id="mform">
+    <div class="grid2">
+      <label>Date<input type="date" name="date" value="${esc(st.date)}" required></label>
+      <label>CSE absorbance<input name="abs" type="number" step="any" min="0" inputmode="decimal" value="${esc(st.absorbance)}" placeholder="e.g. 0.85"></label>
+      <label>Volume per chip (mL)<input name="vol" type="number" step="any" min="0" inputmode="decimal" value="${esc(st.volPerChip)}" required></label>
+      <div id="csePrev" class="calcnote"></div>
+    </div>
+    ${conds.length ? `<div class="muted" style="font-size:13px;font-weight:600;margin:4px 0 6px">Chips per condition <span style="font-weight:400">(default: chips with at least one non-failed chamber)</span></div>
+    <table class="calc"><tbody>${conds.map(c => `<tr><td><b>${esc(c.name)}</b><br><small class="muted">${esc(condDesc(e, c))}</small></td>
+      <td style="width:110px"><input name="n_${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${count(c.id)}"></td></tr>`).join('')}</tbody></table>` : ''}
+    <label style="margin-top:10px">Notes<textarea name="notes" rows="2">${esc(st.notes)}</textarea></label>
+  </form>
+  <div class="sec-head"><h2>Dedicated medium per condition</h2></div>
+  <div class="card scroll" id="mres"></div>
+  <div class="sec-head"><h2>Base medium</h2></div>
+  <div class="card scroll" id="mbase"></div>
+  <button class="btn primary big" id="msave">Save medium change</button>
+  ${isNew ? '' : `<div class="cap-row"><button class="btn danger" id="mdel">${I.trash} Delete</button></div>`}`;
+
+  const form = $('#mform');
+  form.addEventListener('submit', ev => ev.preventDefault());
+  const calc = () => {
+    const f = form.elements;
+    const A = parseFloat(f.abs.value), V = (parseFloat(f.vol.value) || 0) * 1000;
+    const cseF = A > 0 ? CSE_REF / A : null;
+    const cseBad = cseF != null && cseF >= 1;
+    const rows = conds.map(c => {
+      const n = Math.max(0, parseInt(f['n_' + c.id]?.value) || 0), T = n * V;
+      const cse = c.cse ? (cseF && !cseBad ? T * cseF : NaN) : 0;
+      const drugs = (c.drugIds || []).map(id => e.drugs.find(d => d.id === id)).filter(Boolean)
+        .map(d => { const fr = drugFraction(d); return { name: d.name, vol: fr ? T * fr : NaN }; });
+      const medium = T - (cse || 0) - drugs.reduce((s, d) => s + (d.vol || 0), 0);
+      return { condId: c.id, name: c.name, n, total: T, cse, drugs, medium };
+    });
+    return { date: f.date.value, A, V, cseF, cseBad, rows, notes: f.notes.value.trim(), needsCse: conds.some(c => c.cse) };
+  };
+  const render = () => {
+    const r = calc();
+    $('#csePrev').innerHTML = r.cseF ? (r.cseBad ? '<span style="color:var(--danger)">Absorbance must be above 0.07</span>'
+      : `CSE fraction = 0.07 / ${fmtN(r.A)} = <b>${fmtN(r.cseF)}</b> (${fmtN(r.cseF * 100)}% · ${fmtUL(r.cseF * 1000)}/mL)`) : (r.needsCse ? 'Enter the absorbance to calculate CSE' : '');
+    const tot = { total: 0, cse: 0, medium: 0, drugs: {} };
+    r.rows.forEach(x => { tot.total += x.total; tot.cse += x.cse || 0; tot.medium += x.medium; x.drugs.forEach(d => { tot.drugs[d.name] = (tot.drugs[d.name] || 0) + (d.vol || 0); }); });
+    const block = (title, sub, lines) => `<h3 class="subh">${title} <span class="muted" style="font-weight:400">${sub}</span></h3>
+      <table class="calc"><tbody>${lines.map(([n, v, b]) => `<tr><td>${n}</td><td class="num">${b ? `<b>${fmtUL(v)}</b>` : fmtUL(v)}</td></tr>`).join('')}</tbody></table>`;
+    $('#mres').innerHTML = r.rows.length ? r.rows.map(x => block(esc(x.name), `${x.n} chip${x.n === 1 ? '' : 's'} · ${fmtUL(x.total)}`, [
+        ...(x.cse !== 0 ? [['CSE', x.cse, true]] : []),
+        ...x.drugs.map(d => [esc(d.name), d.vol, true]),
+        ['Base medium', x.medium, true],
+      ])).join('') + block('Total', fmtUL(tot.total), [
+        ['CSE', tot.cse], ...Object.entries(tot.drugs).map(([n, v]) => [esc(n), v]), ['Base medium', tot.medium],
+      ]) + `<p class="muted calcnote">Per chip: ${fmtN(r.V / 1000)} mL. CSE and drugs from their dilution, the rest is base medium.</p>` : '<div class="muted">No conditions.</div>';
+    const prep = Math.max(1, Math.ceil(tot.medium / 1000));
+    const k = prep * 1000 / BASE_MEDIUM_TOTAL;
+    $('#mbase').innerHTML = `<p class="calcnote" style="margin-top:0">Needed: <b>${fmtUL(tot.medium)}</b> → prepare <b>${prep} mL</b></p>
+      <table class="calc"><thead><tr><th>Component</th><th>per 10 mL</th><th>for ${prep} mL</th></tr></thead><tbody>
+      ${BASE_MEDIUM.map(([n, v]) => `<tr><td>${n}</td><td class="num">${fmtUL(v)}</td><td class="num"><b>${fmtUL(v * k)}</b></td></tr>`).join('')}</tbody>
+      <tfoot><tr><td>Total</td><td class="num">${fmtUL(BASE_MEDIUM_TOTAL)}</td><td class="num">${fmtUL(prep * 1000)}</td></tr></tfoot></table>`;
+    return { ...r, tot, prep };
+  };
+  form.addEventListener('input', render); render();
+  $('#msave').onclick = async () => {
+    if (!form.reportValidity()) return;
+    const r = render();
+    if (r.needsCse && (!r.cseF || r.cseBad)) { toast('Enter a valid CSE absorbance (> 0.07)', 3000); form.elements.abs.focus(); return; }
+    const rec = {
+      id: mc?.id || uid(), date: r.date, day: e.seedingDate ? dayOf(e.seedingDate, r.date) : null,
+      absorbance: isFinite(r.A) ? r.A : null, cseFraction: r.cseF && !r.cseBad ? r.cseF : null, volPerChip: r.V / 1000,
+      counts: Object.fromEntries(r.rows.map(x => [x.condId, x.n])),
+      rows: r.rows.map(x => ({ name: x.name, n: x.n, total: x.total, cse: x.cse, drugs: x.drugs, medium: x.medium })),
+      baseMediumMl: r.prep, notes: r.notes, savedAt: now(),
+    };
+    const i = e.mediumChanges.findIndex(m => m.id === rec.id);
+    if (i < 0) e.mediumChanges.push(rec); else e.mediumChanges[i] = rec;
+    await saveExp(e); toast('Medium change saved'); goBack('#/exp/' + expId);
+  };
+  $('#mdel') && ($('#mdel').onclick = async () => {
+    if (!await confirmDlg('Delete medium change?', 'This record will be permanently deleted.', 'Delete', 'danger')) return;
+    e.mediumChanges = e.mediumChanges.filter(m => m.id !== mid); await saveExp(e); goBack('#/exp/' + expId);
+  });
+}
+
+/* ---------------- staining ---------------- */
+const VOL_UNIT_UL = { 'µL': 1, 'uL': 1, 'ul': 1, 'µl': 1, 'mL': 1e-3, 'ml': 1e-3, 'L': 1e-6 };
+async function viewStaining(expId, sid) {
+  const e = await get('experiments', expId);
+  if (!e) return go('#/');
+  const [chips, items] = await Promise.all([all('chips', 'expId', expId), all('items')]);
+  await ensureExpShape(e, chips);
+  const isNew = sid === 'new';
+  const old = isNew ? null : e.stainings.find(s => s.id === sid);
+  if (!isNew && !old) return go('#/exp/' + expId);
+  const abItems = items.filter(i => /antibod/i.test(i.category || '')).sort((a, b) => a.name.localeCompare(b.name));
+  const nonFailed = chips.flatMap(c => c.chambers).filter(ch => ch.status !== 'failed').length;
+  const emptySlot = () => ({ itemId: '', name: '', dilution: '' });
+  const s = old ? JSON.parse(JSON.stringify(old)) : {
+    id: uid(), title: '', date: todayISO(), nChambers: nonFailed, volPerChamber: 100, extraPct: 0,
+    primary: [emptySlot(), emptySlot(), emptySlot()], secondary: [emptySlot(), emptySlot(), emptySlot()],
+    deducted: false, imaging: {}, notes: '',
+  };
+  const slot = (pre, i, sl) => {
+    const missing = sl.itemId && sl.itemId !== '__other' && !abItems.some(it => it.id === sl.itemId);
+    return `<div class="abslot">
+      <label>Antibody #${i + 1}<select name="${pre}${i}_item">
+        <option value="">${i ? '— not present —' : '— select —'}</option>
+        ${missing ? `<option value="${esc(sl.itemId)}" selected>${esc(sl.name)} (not in storage)</option>` : ''}
+        ${abItems.map(it => `<option value="${it.id}" ${sl.itemId === it.id ? 'selected' : ''}>${esc(it.name)}${it.lot ? ' · lot ' + esc(it.lot) : ''}</option>`).join('')}
+        <option value="__other" ${sl.itemId === '__other' ? 'selected' : ''}>Other (type name)…</option></select></label>
+      <label>Dilution<input name="${pre}${i}_dil" value="${sl.dilution ? '1:' + sl.dilution : ''}" placeholder="1:200"></label>
+      <label class="span2 abname" ${sl.itemId === '__other' ? '' : 'hidden'}>Antibody name<input name="${pre}${i}_name" value="${esc(sl.itemId === '__other' ? sl.name : '')}"></label>
+    </div>`;
+  };
+  setHeader(isNew ? 'New staining' : (s.title || 'Staining'), { back: '#/exp/' + expId });
+  main.innerHTML = `
+  <form id="sform">
+  <section class="card">
+    <div class="grid2">
+      <label class="span2">Name / markers (optional)<input name="title" value="${esc(s.title)}" placeholder="e.g. ZO-1 / Muc5AC / DAPI"></label>
+      <label>Date<input type="date" name="date" value="${esc(s.date)}" required></label>
+      <label>Chambers to stain<input name="n" type="number" min="1" step="1" inputmode="numeric" value="${esc(s.nChambers)}" required></label>
+      <label>Volume per chamber (µL)<input name="vol" type="number" min="0" step="any" inputmode="decimal" value="${esc(s.volPerChamber)}" required></label>
+      <label>Extra volume (%)<input name="extra" type="number" min="0" step="any" inputmode="decimal" value="${esc(s.extraPct)}"></label>
+    </div>
+    <p class="muted calcnote" style="margin:0">Non-failed chambers in this experiment: ${nonFailed}</p>
+  </section>
+  ${abItems.length ? '' : '<div class="warn">No antibodies in Storage yet. Add them in Storage with category <b>Antibodies</b> to pick them here (or use "Other").</div>'}
+  <div class="sec-head"><h2>Primary antibodies</h2></div>
+  <section class="card">${[0, 1, 2].map(i => slot('p', i, s.primary[i] || emptySlot())).join('')}</section>
+  <div class="sec-head"><h2>Secondary antibodies</h2></div>
+  <section class="card">${[0, 1, 2].map(i => slot('s', i, s.secondary[i] || emptySlot())).join('')}
+    ${s.deducted ? '<p class="muted calcnote">✓ Antibody volumes already deducted from Storage.</p>'
+      : '<label class="check"><input type="checkbox" name="deduct"> Deduct antibody volumes from Storage when saving</label>'}
+  </section>
+  <div class="sec-head"><h2>Solutions to prepare</h2></div>
+  <div class="card scroll" id="sres"></div>
+  <div class="sec-head"><h2>Imaging <span class="muted" style="font-weight:400;font-size:13px">(fill later)</span></h2></div>
+  <section class="card scroll">
+    <table class="calc imgtab"><thead><tr><th>λ (nm)</th><th>Marker</th><th>Laser (%)</th><th>Exposure (ms)</th></tr></thead><tbody>
+    ${WAVELENGTHS.map(w => { const v = s.imaging?.[w] || {}; return `<tr><td><b>${w}</b></td>
+      <td><input name="img_${w}_marker" value="${esc(v.marker)}"></td>
+      <td><input name="img_${w}_laser" type="number" step="any" min="0" inputmode="decimal" value="${esc(v.laser)}"></td>
+      <td><input name="img_${w}_exposure" type="number" step="any" min="0" inputmode="decimal" value="${esc(v.exposure)}"></td></tr>`; }).join('')}
+    </tbody></table>
+    <label style="margin-top:10px">Notes<textarea name="notes" rows="2">${esc(s.notes)}</textarea></label>
+  </section>
+  </form>
+  <button class="btn primary big" id="ssave">Save staining</button>
+  ${isNew ? '' : `<div class="cap-row"><button class="btn danger" id="sdel">${I.trash} Delete</button></div>`}`;
+
+  const form = $('#sform'), f = form.elements;
+  form.addEventListener('submit', ev => ev.preventDefault());
+  const readSlots = pre => [0, 1, 2].map(i => {
+    const itemId = f[`${pre}${i}_item`].value;
+    const it = abItems.find(x => x.id === itemId);
+    const name = itemId === '__other' ? f[`${pre}${i}_name`].value.trim() : it ? it.name : (itemId ? (s[pre === 'p' ? 'primary' : 'secondary'][i]?.name || '') : '');
+    return { itemId, name, dilution: parseRatio(f[`${pre}${i}_dil`].value) || '' };
+  });
+  const calc = () => {
+    const n = parseInt(f.n.value) || 0, vol = parseFloat(f.vol.value) || 0, extra = parseFloat(f.extra.value) || 0;
+    const V = n * vol * (1 + extra / 100);
+    const mk = slots => slots.filter(x => x.itemId).map(x => ({ ...x, vol: x.dilution ? V / x.dilution : NaN }));
+    const P = mk(readSlots('p')), S = mk(readSlots('s'));
+    return { n, vol, extra, V, P, S };
+  };
+  const table = (rows, V) => `<table class="calc"><tbody>${rows.map(([n, v]) => `<tr><td>${n}</td><td class="num"><b>${fmtUL(v)}</b></td></tr>`).join('')}</tbody>
+    <tfoot><tr><td>Total</td><td class="num">${fmtUL(V)}</td></tr></tfoot></table>`;
+  const abRows = (abs, V) => {
+    const gs = V * 0.005, sum = abs.reduce((t, a) => t + (a.vol || 0), 0);
+    return [['Goat Serum (0.5%)', gs], ...abs.map((a, i) => [`#${i + 1} ${esc(a.name || '?')} (${a.dilution ? '1:' + a.dilution : '<span style="color:var(--danger)">no dilution</span>'})`, a.vol]), ['PBS (remaining)', V - gs - sum]];
+  };
+  const render = () => {
+    const r = calc();
+    $$('.abslot').forEach(el => { const sel = $('select', el); $('.abname', el).hidden = sel.value !== '__other'; });
+    $('#sres').innerHTML = `<p class="calcnote" style="margin-top:0">Volume per solution: ${r.n} chambers × ${fmtN(r.vol)} µL${r.extra ? ` + ${fmtN(r.extra)}%` : ''} = <b>${fmtUL(r.V)}</b></p>
+      <h3 class="subh">Permeabilization & blocking</h3>${table([['Goat Serum (5%)', r.V * 0.05], ['Tween-20 (0.1%)', r.V * 0.001], ['PBS (remaining)', r.V * (1 - 0.05 - 0.001)]], r.V)}
+      <h3 class="subh">Primary antibody solution</h3>${r.P.length ? table(abRows(r.P, r.V), r.V) : '<p class="muted">Select antibody #1.</p>'}
+      <h3 class="subh">Secondary antibody solution</h3>${r.S.length ? table(abRows(r.S, r.V), r.V) : '<p class="muted">Select antibody #1.</p>'}`;
+    return r;
+  };
+  form.addEventListener('input', render); form.addEventListener('change', ev => {
+    render();
+    const m = ev.target.name?.match(/^([ps])(\d)_item$/);
+    if (m) { const it = abItems.find(x => x.id === ev.target.value); const dil = f[`${m[1]}${m[2]}_dil`]; if (it?.abDilution && !dil.value) { dil.value = '1:' + it.abDilution; render(); } }
+  });
+  render();
+  $('#ssave').onclick = async () => {
+    if (!form.reportValidity()) return;
+    const r = render();
+    const P = readSlots('p'), S = readSlots('s');
+    for (const [lbl, arr] of [['primary', P], ['secondary', S]]) {
+      if (!arr[0].itemId) { toast(`Select ${lbl} antibody #1`, 3000); return; }
+      for (const [i, a] of arr.entries()) if (a.itemId && (!a.dilution || (a.itemId === '__other' && !a.name))) { toast(`Check name and dilution of ${lbl} antibody #${i + 1}`, 3000); return; }
+    }
+    const withVol = arr => arr.map(a => a.itemId ? { ...a, vol: r.V / a.dilution } : a);
+    Object.assign(s, {
+      title: f.title.value.trim(), date: f.date.value, day: e.seedingDate ? dayOf(e.seedingDate, f.date.value) : null,
+      nChambers: r.n, volPerChamber: r.vol, extraPct: r.extra, totalVolume: r.V, primary: withVol(P), secondary: withVol(S),
+      imaging: Object.fromEntries(WAVELENGTHS.map(w => [w, { marker: f[`img_${w}_marker`].value.trim(), laser: f[`img_${w}_laser`].value, exposure: f[`img_${w}_exposure`].value }])),
+      notes: f.notes.value.trim(), savedAt: now(),
+    });
+    // remember dilutions + optional stock deduction
+    const skipped = [];
+    const used = [...s.primary, ...s.secondary].filter(a => abItems.some(it => it.id === a.itemId));
+    for (const a of used) { const it = await get('items', a.itemId); if (it && it.abDilution !== a.dilution) { it.abDilution = a.dilution; await put('items', it); } }
+    if (f.deduct?.checked && !s.deducted) {
+      for (const a of used) {
+        const it = await get('items', a.itemId), k = VOL_UNIT_UL[it.unit];
+        if (k == null) { skipped.push(`${it.name} (unit ${it.unit})`); continue; }
+        await applyMovement(it.id, -round(a.vol * k), { type: 'remove', expId, note: `Staining ${s.title || fmtDate(s.date)}` });
+      }
+      s.deducted = true;
+    }
+    const i = e.stainings.findIndex(x => x.id === s.id);
+    if (i < 0) e.stainings.push(s); else e.stainings[i] = s;
+    await saveExp(e);
+    toast(skipped.length ? `Saved. Not deducted (unit not µL/mL): ${skipped.join(', ')}` : 'Staining saved', skipped.length ? 5000 : 2200);
+    goBack('#/exp/' + expId);
+  };
+  $('#sdel') && ($('#sdel').onclick = async () => {
+    if (!await confirmDlg('Delete staining?', 'This record will be permanently deleted. Storage deductions are not reverted.', 'Delete', 'danger')) return;
+    e.stainings = e.stainings.filter(x => x.id !== sid); await saveExp(e); goBack('#/exp/' + expId);
+  });
 }
 async function deleteExperiment(id) {
   await tx(['experiments', 'chips', 'photos'], 'readwrite', async t => {

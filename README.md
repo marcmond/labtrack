@@ -43,9 +43,13 @@ If you receive new app files, upload them to the same GitHub repository (overwri
 
 | Where | What |
 |---|---|
-| Experiments list | Active / Finished / All; **New experiment** numbers automatically (#01, #02…) |
+| Experiments list | Active / Finished / All; **New experiment** numbers automatically (#01, #02…) and asks for the **Model** (8 defaults, or *+ New model…*) |
 | Experiment page | Title, status, seeding date (→ automatic Day N), protocol, cells harvested, notes. Chips seeded is counted automatically |
-| Add chip | Adds one or more chips named A, B, C… (AA after Z), each with chambers 1–3 and a condition/treatment. ✎ to edit or delete a chip |
+| Conditions | List of conditions for the experiment; each chip is assigned one. For **Lung-COPD** each condition has CSE yes/no and one or more drugs |
+| Drugs (COPD) | Name + dilution as ratio 1:X or stock → final concentration (M…pM, mg/mL…ng/mL, %, ×) |
+| Add chip | Adds one or more chips named A, B, C… (AA after Z), each with chambers 1–3 and a condition. ✎ to edit or delete a chip |
+| Medium change (COPD) | Enter CSE absorbance → CSE fraction = 0.07 / absorbance. Per condition (chips × 1 mL, editable) shows CSE, each drug (from its dilution) and base medium (the rest), plus the base-medium recipe scaled to the volume needed. Chips whose 3 chambers all failed are excluded by default |
+| Staining | Chambers to stain (default = non-failed chambers), 100 µL each (+ optional extra %). Calculates blocking (Goat Serum 5 %, Tween-20 0.1 %, PBS), primary and secondary solutions (Goat Serum 0.5 %, up to 3 antibodies from Storage category *Antibodies*, PBS). Can deduct antibody volumes from Storage (items with unit µL or mL). Imaging table (405/477/545/637 nm: marker, laser %, exposure ms) can be filled later |
 | Chamber (tap a tile) | Status **OK / Low-density / Failed** (failed asks reason + day), notes, **Take photo** for the selected day (−/+ to change day), timeline. ‹ › jump to previous/next chamber |
 | Photos by day | Compare all chambers of one day side by side |
 | Photo viewer | Swipe/arrow between photos, change day, delete |

@@ -196,3 +196,28 @@ dialog h2{margin:0 0 12px;font-size:18px}
 #toast{position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);opacity:0;pointer-events:none;
   background:#1f2933;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;z-index:60;transition:.2s;max-width:90vw;text-align:center}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* v1.1 */
+.tag.model{background:var(--accent-soft);color:var(--accent)}
+.tag.ok{background:color-mix(in srgb,var(--ok) 18%,transparent);color:var(--ok)}
+.rowbtn{width:100%;background:none;border:0;border-bottom:1px solid var(--line);cursor:pointer;text-align:left;align-items:center;color:inherit;font:inherit}
+.rowbtn:last-child{border:0}
+a.used{text-decoration:none;align-items:center}
+label.check{display:flex;align-items:center;gap:8px;color:var(--text);font-weight:500;font-size:15px;margin:6px 0}
+label.check input{width:20px;height:20px;margin:0;flex:none;accent-color:var(--accent)}
+.scroll{overflow-x:auto}
+table.calc{width:100%;border-collapse:collapse;font-size:14px}
+table.calc th{text-align:left;font-size:12px;color:var(--muted);font-weight:700;padding:6px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.calc td{padding:7px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.calc td input{margin:0}
+table.calc .num{text-align:right;white-space:nowrap}
+table.calc th:not(:first-child){text-align:right}
+table.calc tfoot td{font-weight:700;border-bottom:0;border-top:2px solid var(--line)}
+table.imgtab th{text-align:left!important}
+table.imgtab input{min-width:70px}
+.calcnote{font-size:13px;color:var(--muted);align-self:center}
+.subh{font-size:14px;margin:14px 0 4px}
+.abslot{display:grid;grid-template-columns:2fr 1fr;gap:0 10px;padding-bottom:4px;border-bottom:1px dashed var(--line);margin-bottom:10px}
+.abslot:last-of-type{border-bottom:0}
+table.calc .wrap{white-space:normal;min-width:90px}
+@media (max-width:480px){table.calc{font-size:13px}table.calc td,table.calc th{padding:6px 4px}}

@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -374,7 +374,7 @@ async function viewExperiment(id) {
   $$('[data-cond]').forEach(b => b.onclick = async () => { if (await condDialog(e, e.conditions.find(c => c.id === b.dataset.cond))) rerender(); });
   $('#addDrug') && ($('#addDrug').onclick = async () => { if (await drugDialog(e, null)) rerender(); });
   $$('[data-drug]').forEach(b => b.onclick = async () => { if (await drugDialog(e, e.drugs.find(d => d.id === b.dataset.drug))) rerender(); });
-  $('#expExport').onclick = () => exportExperiment(id);
+  $('#expExport').onclick = () => exportMenu('exp', id);
   $('#expDelete').onclick = async () => {
     if (!await confirmDlg('Delete experiment?', `${expNum(e)} ${esc(e.title)} with all its chips and ${photos.length} photos will be permanently deleted from this device. Consider exporting it first.`, 'Delete', 'danger')) return;
     await deleteExperiment(id); toast('Experiment deleted'); goBack('#/');
@@ -1139,7 +1139,8 @@ function expiryState(i) {
   return d < 0 ? { cls: 'expired', txt: 'Expired' } : d <= 30 ? { cls: 'soon', txt: d === 0 ? 'Expires today' : `Expires in ${d} d` } : null;
 }
 async function viewStorage() {
-  setHeader('Storage');
+  setHeader('Storage', { actions: `<button class="icon" id="stExport" title="Export storage">${I.download}</button>` });
+  $('#stExport').onclick = () => exportMenu('storage');
   const items = await all('items');
   const cats = [...new Set(items.map(i => i.category || 'Uncategorized'))].sort();
   if (stCat && !cats.includes(stCat)) stCat = '';
@@ -1655,7 +1656,7 @@ async function viewExpansion(id) {
   ${running ? '' : `<div class="cap-row"><button class="btn" id="reopen">Reopen expansion</button></div>`}`;
 
   $('#cxEdit').onclick = () => expansionDialog(x);
-  $('#cxExport').onclick = () => exportExpansion(id);
+  $('#cxExport').onclick = () => exportMenu('cexp', id);
   $('#cxDelete').onclick = async () => {
     if (!await confirmDlg('Delete expansion?', `#${pad2(x.number)} ${esc(x.cellType)} and its ${photos.length} photos will be permanently deleted. Consider exporting it first.`, 'Delete', 'danger')) return;
     await tx(['expansions', 'photos'], 'readwrite', async t => {
@@ -1863,6 +1864,257 @@ async function importExpansion(data) {
 }
 
 /* =========================================================
+   EXPORT CHOICE + DETAILED REPORTS
+   ========================================================= */
+async function exportMenu(kind, id) {
+  const label = { exp: 'experiment', cexp: 'cell expansion', storage: 'storage' }[kind];
+  const r = await dialog({
+    title: `Export ${label}`,
+    body: `<p><b>Data file (.json)</b> – to move to another device or keep as a backup. It can be imported back into LabTrack.</p>
+      <p><b>Report</b> – a readable document with all the information, to print, save as PDF or share.</p>
+      ${kind === 'storage' ? '<label class="check"><input type="checkbox" name="hist" checked> Include movement history in the report</label>'
+        : '<label class="check"><input type="checkbox" name="photos" checked> Include photos in the report</label>'}`,
+    actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Data file (.json)', value: 'json' }, { label: 'Report', value: 'report', cls: 'primary' }],
+  });
+  if (r.action === 'json') return kind === 'exp' ? exportExperiment(id) : kind === 'cexp' ? exportExpansion(id) : exportStorage();
+  if (r.action !== 'report') return;
+  toast('Building report…', 20000);
+  try {
+    const rep = kind === 'exp' ? await reportExperiment(id, !!r.data.photos)
+      : kind === 'cexp' ? await reportExpansion(id, !!r.data.photos) : await reportStorage(!!r.data.hist);
+    $('#toast').classList.remove('show');
+    openReport(rep.title, rep.html, rep.file);
+  } catch (e) { console.error(e); toast('Could not build report: ' + e.message, 5000); }
+}
+
+const REPORT_CSS = `
+*{box-sizing:border-box}body{font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#18212b;margin:0;padding:24px;background:#fff}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-size:22px;margin:0 0 2px;color:#0f766e}h2{font-size:16px;margin:26px 0 8px;padding-bottom:4px;border-bottom:2px solid #0f766e;color:#0f766e}
+h3{font-size:14px;margin:16px 0 6px}.sub{color:#667085;margin:0 0 10px}
+table{width:100%;border-collapse:collapse;margin:4px 0 10px;font-size:12.5px}
+th{text-align:left;background:#eef6f5;color:#344054;font-weight:700;padding:5px 7px;border:1px solid #d9e2e8}
+td{padding:5px 7px;border:1px solid #e2e6eb;vertical-align:top}
+td.n,th.n{text-align:right;white-space:nowrap}tfoot td{font-weight:700;background:#f7f9fa}
+table.kv td:first-child{width:36%;color:#475467;font-weight:600;background:#fafbfc}
+.st{font-weight:700;padding:1px 7px;border-radius:9px;font-size:11.5px;white-space:nowrap}
+.st.ok{background:#e1f4e8;color:#1e7a45}.st.low{background:#fff3c4;color:#7a5a00}.st.failed{background:#fde2e2;color:#b42318}
+.muted{color:#667085}.note{white-space:pre-wrap}
+.block{border:1px solid #e2e6eb;border-radius:10px;padding:10px 12px;margin:10px 0;page-break-inside:avoid}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0 12px}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:6px 0 12px}
+figure{margin:0;page-break-inside:avoid}figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:3px solid #2e9d5b;display:block}
+figure.low img{border-color:#e0b100}figure.failed img{border-color:#d64545}figure.none{border:1px dashed #cfd6dd;border-radius:6px;aspect-ratio:1;display:flex;align-items:center;justify-content:center;color:#98a2b3;font-size:11px}
+figcaption{font-size:11px;color:#475467;margin-top:2px}
+.day{page-break-inside:avoid}
+.small table{font-size:11px}.small td,.small th{padding:4px 5px}
+@page{size:A4;margin:14mm}
+@media print{body{padding:0}h2{page-break-after:avoid}}
+`;
+function reportDoc(title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${REPORT_CSS}</style></head>
+<body><div class="wrap">${body}<p class="muted" style="margin-top:30px;font-size:11px">Generated ${fmtDateTime(new Date().toISOString())} with LabTrack ${APP_VERSION}</p></div></body></html>`;
+}
+const rKV = rows => `<table class="kv"><tbody>${rows.filter(r => r && r[1] !== undefined && r[1] !== null && r[1] !== '').map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</tbody></table>`;
+const rTable = (head, rows, foot) => `<table><thead><tr>${head.map(h => `<th${h.n ? ' class="n"' : ''}>${h.t ?? h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${head[i]?.n ? ' class="n"' : ''}>${c ?? ''}</td>`).join('')}</tr>`).join('')}</tbody>${foot ? `<tfoot><tr>${foot.map((c, i) => `<td${head[i]?.n ? ' class="n"' : ''}>${c ?? ''}</td>`).join('')}</tr></tfoot>` : ''}</table>`;
+const stBadge = s => `<span class="st ${s}">${CH_STATUS[s]}</span>`;
+const nl = s => s ? `<span class="note">${esc(s)}</span>` : '';
+
+async function reportExperiment(id, withPhotos) {
+  const e = await get('experiments', id);
+  const [chips, photos, movs, items] = await Promise.all([all('chips', 'expId', id), all('photos', 'expId', id), all('movements', 'expId', id), all('items')]);
+  chips.sort((a, b) => a.idx - b.idx);
+  await ensureExpShape(e, chips);
+  const itemMap = Object.fromEntries(items.map(i => [i.id, i]));
+  const allCh = chips.flatMap(c => c.chambers);
+  const cnt = s => allCh.filter(c => c.status === s).length;
+  const cc = cellTotal(e.cellCount);
+  const copd = e.model === COPD_MODEL;
+  let h = `<h1>Experiment ${expNum(e)}${e.title ? ' – ' + esc(e.title) : ''}</h1><p class="sub">${esc(e.model || 'No model')} · ${e.status}</p>`;
+  h += `<h2>General information</h2>` + rKV([
+    ['Model', esc(e.model)], ['Status', e.status], ['Seeding date', fmtDate(e.seedingDate)],
+    ['Current day', e.seedingDate && e.status !== 'Finished' ? 'Day ' + dayOf(e.seedingDate, todayISO()) : ''],
+    ['Protocol', esc(e.protocol)], ['Chips seeded', chips.length],
+    ['Chambers', `${allCh.length} – ${cnt('ok')} OK, ${cnt('low')} low-density, ${cnt('failed')} failed`],
+    ['Notes', nl(e.notes)],
+  ]);
+  h += `<h2>Cell count</h2>` + (cc ? rKV([
+    ['Counts', e.cellCount.counts.map(fmtN).join(', ')], ['Average count', fmtN(cc.avg)], ['Dilution factor', fmtN(cc.dil)],
+    ['Total cells (average × dilution × 10⁴)', `<b>${fmtSci(cc.total)}</b>`],
+  ]) : `<p class="muted">${e.cellsHarvested ? 'Cells harvested: ' + esc(e.cellsHarvested) : 'No cell count entered.'}</p>`);
+  h += `<h2>Conditions</h2>` + (e.conditions.length ? rTable(['Condition', ...(copd ? ['CSE', 'Drugs'] : []), 'Chips'],
+    e.conditions.map(c => [`<b>${esc(c.name)}</b>`, ...(copd ? [c.cse ? 'Yes' : 'No', (c.drugIds || []).map(d => esc(e.drugs.find(x => x.id === d)?.name || '')).join(', ') || '–'] : []),
+      chips.filter(x => x.conditionId === c.id).map(x => x.letter).join(', ') || '–'])) : '<p class="muted">No conditions.</p>');
+  if (e.drugs.length) h += `<h3>Drugs</h3>` + rTable(['Drug', 'Dilution', { t: 'Per mL of medium', n: 1 }],
+    e.drugs.map(d => { const f = drugFraction(d); return [esc(d.name), d.mode === 'conc' ? `${esc(d.stock)} ${d.stockUnit} → ${esc(d.final)} ${d.finalUnit} (1:${f ? fmtN(1 / f) : '?'})` : `1:${d.ratio}`, f ? fmtUL(f * 1000) : '–']; }));
+  h += `<h2>Chips and chambers</h2>` + (chips.length ? rTable(['Chip', 'Condition', 'Chamber', 'Status', 'Failure', 'Notes', { t: 'Photos', n: 1 }],
+    chips.flatMap(c => c.chambers.map((ch, i) => [
+      i === 0 ? `<b>${c.letter}</b>${c.notes ? '<br><span class="muted">' + esc(c.notes) + '</span>' : ''}` : '', i === 0 ? esc(condName(e, c)) : '',
+      c.letter + (i + 1), stBadge(ch.status),
+      ch.status === 'failed' ? `${esc(ch.failReason || '')}${ch.failDay != null && ch.failDay !== '' ? ' · day ' + ch.failDay : ''}${ch.failNote ? ' · ' + esc(ch.failNote) : ''}` : '',
+      nl(ch.notes), photos.filter(p => p.chipId === c.id && p.chamber === i + 1).length,
+    ]))) : '<p class="muted">No chips.</p>');
+  if (e.mediumChanges.length) {
+    h += `<h2>Medium changes</h2>`;
+    for (const m of [...e.mediumChanges].sort((a, b) => a.date.localeCompare(b.date))) {
+      const tot = { total: 0, cse: 0, medium: 0 };
+      (m.rows || []).forEach(r => { tot.total += r.total || 0; tot.cse += r.cse || 0; tot.medium += r.medium || 0; });
+      const k = (m.baseMediumMl || 0) * 1000 / BASE_MEDIUM_TOTAL;
+      h += `<div class="block"><h3 style="margin-top:0">${m.day != null ? 'Day ' + m.day + ' · ' : ''}${fmtDate(m.date)}</h3>` + rKV([
+        ['CSE absorbance', m.absorbance ?? '–'], ['CSE fraction (0.07 / absorbance)', m.cseFraction ? `${fmtN(m.cseFraction)} (${fmtN(m.cseFraction * 100)} %)` : '–'],
+        ['Volume per chip', fmtN(m.volPerChip) + ' mL'], ['Notes', nl(m.notes)],
+      ]) + rTable(['Condition', { t: 'Chips', n: 1 }, { t: 'Total', n: 1 }, { t: 'CSE', n: 1 }, 'Drugs', { t: 'Base medium', n: 1 }],
+        (m.rows || []).map(r => [esc(r.name), r.n, fmtUL(r.total), r.cse ? fmtUL(r.cse) : '–', (r.drugs || []).map(d => `${esc(d.name)} ${fmtUL(d.vol)}`).join('<br>') || '–', `<b>${fmtUL(r.medium)}</b>`]),
+        ['Total', '', fmtUL(tot.total), fmtUL(tot.cse), '', fmtUL(tot.medium)])
+        + `<p style="margin:4px 0">Base medium prepared: <b>${m.baseMediumMl} mL</b></p>`
+        + rTable(['Component', { t: 'per 10 mL', n: 1 }, { t: `for ${m.baseMediumMl} mL`, n: 1 }], BASE_MEDIUM.map(([n, v]) => [n, fmtUL(v), `<b>${fmtUL(v * k)}</b>`])) + `</div>`;
+    }
+  }
+  if (e.stainings.length) {
+    h += `<h2>Stainings</h2>`;
+    for (const s of [...e.stainings].sort((a, b) => a.date.localeCompare(b.date))) {
+      const V = s.totalVolume ?? s.nChambers * s.volPerChamber * (1 + (s.extraPct || 0) / 100);
+      const abT = abs => { const list = abs.filter(a => a.itemId); const gs = V * 0.005, sum = list.reduce((t, a) => t + (a.vol || V / a.dilution || 0), 0);
+        return rTable(['Component', { t: 'Volume', n: 1 }], [['Goat Serum (0.5 %)', fmtUL(gs)], ...list.map((a, i) => [`#${i + 1} ${esc(a.name)} (1:${a.dilution})`, fmtUL(a.vol ?? V / a.dilution)]), ['PBS (remaining)', fmtUL(V - gs - sum)]], ['Total', fmtUL(V)]); };
+      const img = WAVELENGTHS.map(w => [w, esc(s.imaging?.[w]?.marker), s.imaging?.[w]?.laser ?? '', s.imaging?.[w]?.exposure ?? '']);
+      h += `<div class="block"><h3 style="margin-top:0">${esc(s.title || 'Staining')} – ${s.day != null ? 'Day ' + s.day + ' · ' : ''}${fmtDate(s.date)}</h3>` + rKV([
+        ['Chambers stained', s.nChambers], ['Volume per chamber', fmtN(s.volPerChamber) + ' µL'], ['Extra volume', s.extraPct ? fmtN(s.extraPct) + ' %' : ''],
+        ['Volume per solution', fmtUL(V)], ['Antibodies deducted from storage', s.deducted ? 'Yes' : 'No'], ['Notes', nl(s.notes)],
+      ]) + `<h3>Permeabilization & blocking</h3>` + rTable(['Component', { t: 'Volume', n: 1 }], [['Goat Serum (5 %)', fmtUL(V * 0.05)], ['Tween-20 (0.1 %)', fmtUL(V * 0.001)], ['PBS (remaining)', fmtUL(V * 0.949)]], ['Total', fmtUL(V)])
+        + `<h3>Primary antibodies</h3>` + abT(s.primary || []) + `<h3>Secondary antibodies</h3>` + abT(s.secondary || [])
+        + `<h3>Imaging</h3>` + rTable([{ t: 'λ (nm)' }, 'Marker', { t: 'Laser (%)', n: 1 }, { t: 'Exposure (ms)', n: 1 }], img) + `</div>`;
+    }
+  }
+  h += `<h2>Consumables used</h2>` + (movs.length ? rTable(['Date', 'Item', { t: 'Quantity', n: 1 }, 'Note'],
+    movs.sort((a, b) => a.date.localeCompare(b.date)).map(m => [fmtDateTime(m.date), esc(itemMap[m.itemId]?.name || 'deleted item'), `${fmtQty(-m.delta)} ${esc(itemMap[m.itemId]?.unit || '')}`, esc(m.note)])) : '<p class="muted">None recorded.</p>');
+  if (withPhotos && photos.length) {
+    h += `<h2>Photos</h2>`;
+    const days = [...new Set(photos.map(p => p.day))].sort((a, b) => a - b);
+    for (const d of days) {
+      h += `<div class="day"><h3>Day ${d}${e.seedingDate ? ' · ' + fmtDate(dateForDay(e.seedingDate, d)) : ''}</h3>`;
+      for (const c of chips) {
+        const cells = [];
+        for (let n = 1; n <= 3; n++) {
+          const p = photos.find(x => x.day === d && x.chipId === c.id && x.chamber === n), st = c.chambers[n - 1].status;
+          cells.push(p ? `<figure class="${st}"><img src="${await blobToDataURL(p.blob)}" alt=""><figcaption><b>${c.letter}${n}</b> · ${esc(condName(e, c))}</figcaption></figure>` : `<figure class="none">${c.letter}${n} – no photo</figure>`);
+        }
+        if (photos.some(x => x.day === d && x.chipId === c.id)) h += `<div class="grid">${cells.join('')}</div>`;
+      }
+      h += `</div>`;
+    }
+  }
+  const title = `Experiment ${expNum(e)} ${e.title || ''}`.trim();
+  return { title, html: reportDoc(title, h), file: `LabTrack_Report_Exp${pad2(e.number)}${e.title ? '_' + slug(e.title) : ''}_${todayISO()}.html` };
+}
+
+async function reportExpansion(id, withPhotos) {
+  const x = await get('expansions', id), photos = await all('photos', 'expId', id);
+  const st = expansionStats(x);
+  const area = st.area;
+  let h = `<h1>Cell expansion #${pad2(x.number)} – ${esc(x.cellType)}</h1><p class="sub">${x.lot ? 'Lot ' + esc(x.lot) + ' · ' : ''}${x.status}</p>`;
+  h += `<h2>General information</h2>` + rKV([
+    ['Cell type', esc(x.cellType)], ['Lot', esc(x.lot)], ['Cells in vial (theoretical)', fmtCells(x.vialCells)],
+    ['Seeding efficiency', fmtN(x.seedingEff) + ' %'], ['Cell viability', fmtN(x.viability) + ' %'],
+    ['Flask type', esc(x.flaskType) + (area ? ` (${area} cm²)` : '')], ['Started', fmtDT(x.passages[0].start)], ['Status', x.status],
+    ['Passages', x.passages.map(pLabel).join(', ')], ['Notes', nl(x.notes)],
+  ]);
+  if (st.splits) h += `<h2>Overall results</h2>` + rTable(['Parameter', { t: 'Raw', n: 1 }, { t: 'Corrected', n: 1 }], [
+    ['Passages completed', st.splits, ''], ['Time (completed passages)', fmtDur(st.doneH), ''],
+    ['Cumulative population doublings', fmtN(st.cpd), fmtN(st.cpdC)], ['<b>Mean doubling time</b>', `<b>${fmtH(st.dt)}</b>`, `<b>${fmtH(st.dtC)}</b>`],
+    ['Theoretical yield (all cells kept)', fmtCells(st.yieldT), ''], ['Total harvested', fmtCells(st.tot.harvested), ''],
+    ['Total frozen', fmtCells(st.tot.frozen), ''], ['Total used', fmtCells(st.tot.used), ''], ['Total discarded', fmtCells(st.tot.discarded), ''],
+  ]) + `<p class="muted">Corrected: N₀ × seeding efficiency × viability (vial viability for the first passage, viability at harvest – if entered – for later passages).</p>`;
+  h += `<h2>Passage summary</h2><div class="small">` + rTable(['Passage', 'Seeded', 'Harvested', { t: 'Flasks', n: 1 }, { t: 'N₀', n: 1 }, { t: 'N', n: 1 }, { t: 'Time', n: 1 }, { t: 'PD raw', n: 1 }, { t: 'PD corr.', n: 1 }, { t: 'DT raw', n: 1 }, { t: 'DT corr.', n: 1 }],
+    st.rows.map(r => [pLabel(r.p), fmtDT(r.p.start), r.p.split ? fmtDT(r.p.split.date) : 'running', r.nFlasks, fmtCells(r.N0), r.p.split ? fmtCells(r.p.split.harvested) : '–',
+      r.p.split ? fmtN(r.h) + ' h' : '–', r.p.split ? fmtN(r.pd) : '–', r.p.split ? fmtN(r.pdC) : '–', r.p.split ? fmtH(r.dt) : '–', r.p.split ? fmtH(r.dtC) : '–'])) + '</div>';
+  h += `<h2>Passage details</h2>`;
+  for (const r of st.rows) {
+    const s = r.p.split;
+    h += `<div class="block"><h3 style="margin-top:0">${pLabel(r.p)} · ${fmtDT(r.p.start)} → ${s ? fmtDT(s.date) : 'running'}</h3>`
+      + rTable(['Flask', { t: 'Cells seeded', n: 1 }, ...(area ? [{ t: 'Density', n: 1 }] : []), 'Notes', { t: 'Photos', n: 1 }],
+        r.p.flasks.map(f => [f.name, fmtCells(f.seeded), ...(area ? [fmtCells(f.seeded / area) + '/cm²'] : []), nl(f.notes), photos.filter(p => p.chipId === f.id).length]))
+      + rTable(['Parameter', { t: 'Raw', n: 1 }, { t: 'Corrected', n: 1 }], [
+        ['Cells seeded (N₀)', fmtCells(r.N0), fmtCells(r.N0c)],
+        ...(r.seedDens != null ? [['Seeding density', fmtCells(r.seedDens) + '/cm²', fmtCells(r.N0c / (r.nFlasks * area)) + '/cm²']] : []),
+        ['Time in culture', fmtDur(r.h), ''],
+        ...(s ? [
+          ['Cells harvested (N)', fmtCells(s.harvested), ''],
+          ...(r.harvDens != null ? [['Harvest density', fmtCells(r.harvDens) + '/cm²', '']] : []),
+          ['Fold expansion', fmtN(r.fold) + '×', fmtN(r.foldC) + '×'], ['Population doublings', fmtN(r.pd), fmtN(r.pdC)],
+          ['<b>Doubling time</b>', `<b>${fmtH(r.dt)}</b>`, `<b>${fmtH(r.dtC)}</b>`],
+          ['Growth rate μ', r.mu != null ? fmtN(r.mu) + ' /day' : '–', r.muC != null ? fmtN(r.muC) + ' /day' : '–'],
+          ['Cumulative PD', fmtN(r.cpd), fmtN(r.cpdC)],
+          ['Frozen', fmtCells(s.frozen), ''], ['Used', fmtCells(s.used), ''], ['Thrown away', fmtCells(s.discarded), ''],
+          ...(s.viability ? [['Viability at harvest', fmtN(s.viability) + ' %', '']] : []),
+          ...(s.notes ? [['Split notes', nl(s.notes), '']] : []),
+        ] : []),
+      ]) + `</div>`;
+  }
+  if (withPhotos && photos.length) {
+    h += `<h2>Photos</h2>`;
+    for (const p of x.passages) for (const f of p.flasks) {
+      const ph = photos.filter(q => q.chipId === f.id).sort((a, b) => a.day - b.day);
+      if (!ph.length) continue;
+      const figs = [];
+      for (const q of ph) figs.push(`<figure><img src="${await blobToDataURL(q.blob)}" alt=""><figcaption><b>Day ${q.day}</b> · ${fmtDate(q.date)}</figcaption></figure>`);
+      h += `<div class="day"><h3>${pLabel(p)} · ${f.name}</h3><div class="grid4">${figs.join('')}</div></div>`;
+    }
+  }
+  const title = `Cell expansion #${pad2(x.number)} ${x.cellType || ''}`.trim();
+  return { title, html: reportDoc(title, h), file: `LabTrack_Report_Expansion${pad2(x.number)}_${slug(x.cellType)}_${todayISO()}.html` };
+}
+
+async function reportStorage(withHist) {
+  const [items, movs, exps] = await Promise.all([all('items'), all('movements'), all('experiments')]);
+  const expMap = Object.fromEntries(exps.map(e => [e.id, e])), itemMap = Object.fromEntries(items.map(i => [i.id, i]));
+  const low = items.filter(isLow), expiring = items.filter(expiryState);
+  let h = `<h1>Storage inventory</h1><p class="sub">${items.length} items · ${fmtDate(todayISO())}</p>`;
+  h += `<h2>Alerts</h2>` + ((low.length || expiring.length) ? rTable(['Item', 'Alert', { t: 'Quantity', n: 1 }, 'Location'],
+    [...low.map(i => [esc(i.name), `Low stock (min ${fmtQty(i.minQty)})`, `${fmtQty(i.quantity)} ${esc(i.unit)}`, esc(i.location)]),
+     ...expiring.map(i => [esc(i.name), `${expiryState(i).txt} (${fmtDate(i.expiry)})`, `${fmtQty(i.quantity)} ${esc(i.unit)}`, esc(i.location)])]) : '<p class="muted">No low-stock or expiring items.</p>');
+  const groups = Object.entries(groupBy(items.map(i => ({ ...i, _c: i.category || 'Uncategorized' })), '_c')).sort((a, b) => a[0].localeCompare(b[0]));
+  h += `<h2>Inventory</h2>`;
+  for (const [cat, its] of groups) {
+    h += `<h3>${esc(cat)}</h3>` + rTable(['Item', { t: 'Quantity', n: 1 }, { t: 'Min', n: 1 }, 'Location', 'Lot', 'Expiry', 'Supplier / cat. #', 'Notes'],
+      its.sort((a, b) => a.name.localeCompare(b.name)).map(i => [`<b>${esc(i.name)}</b>${isLow(i) ? ' <span class="st low">LOW</span>' : ''}`,
+        `${fmtQty(i.quantity)} ${esc(i.unit)}`, i.minQty === '' || i.minQty == null ? '' : fmtQty(i.minQty), esc(i.location), esc(i.lot),
+        i.expiry ? fmtDate(i.expiry) + (expiryState(i) ? ` <span class="st ${expiryState(i).cls === 'expired' ? 'failed' : 'low'}">${expiryState(i).txt}</span>` : '') : '',
+        [i.supplier, i.catalog].filter(Boolean).map(esc).join(' · '), nl(i.notes)]));
+  }
+  if (withHist) {
+    h += `<h2>Movement history</h2>` + (movs.length ? rTable(['Date', 'Item', 'Type', { t: 'Change', n: 1 }, { t: 'Balance', n: 1 }, 'Experiment', 'Note'],
+      movs.sort((a, b) => b.date.localeCompare(a.date)).map(m => {
+        const it = itemMap[m.itemId];
+        return [fmtDateTime(m.date), esc(it?.name || 'deleted item'), m.type === 'set' ? 'Stocktake' : m.type === 'initial' ? 'Initial' : m.delta >= 0 ? 'Added' : 'Removed',
+          `${m.delta >= 0 ? '+' : '−'}${fmtQty(Math.abs(m.delta))}`, `${fmtQty(m.balance)} ${esc(it?.unit || '')}`,
+          m.expId ? (expMap[m.expId] ? expNum(expMap[m.expId]) + ' ' + esc(expMap[m.expId].title || '') : 'deleted') : '', esc(m.note)];
+      })) : '<p class="muted">No movements.</p>');
+  }
+  return { title: 'Storage inventory', html: reportDoc('Storage inventory', h), file: `LabTrack_Report_Storage_${todayISO()}.html` };
+}
+
+function openReport(title, html, file) {
+  const blob = new Blob([html], { type: 'text/html' }), src = URL.createObjectURL(blob);
+  const ov = document.createElement('div');
+  ov.className = 'reportview';
+  ov.innerHTML = `<div class="rv-top"><button class="icon" data-a="close" title="Close">${I.close}</button><b class="rv-title">${esc(title)}</b>
+    <button class="btn" data-a="dl">${I.download} HTML</button><button class="btn primary" data-a="print">Print / PDF</button></div>
+    <iframe title="Report"></iframe>`;
+  document.body.appendChild(ov);
+  const frame = $('iframe', ov); frame.src = src;
+  let closed = false;
+  const doClose = () => { if (closed) return; closed = true; ov.remove(); setTimeout(() => URL.revokeObjectURL(src), 1000); removeEventListener('popstate', doClose); };
+  history.pushState({ report: 1 }, '', location.href);
+  addEventListener('popstate', doClose);
+  $('[data-a=close]', ov).onclick = () => history.back();
+  $('[data-a=print]', ov).onclick = () => { try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (e) { toast('Printing not available here – download the HTML and print it from the browser', 4000); } };
+  $('[data-a=dl]', ov).onclick = () => {
+    const a = document.createElement('a'); a.href = src; a.download = file; document.body.appendChild(a); a.click(); a.remove();
+    toast(`Saved ${file} (${fmtSize(blob.size)})`, 3000);
+  };
+}
+
+/* =========================================================
    SETTINGS
    ========================================================= */
 let installEvt = null;
@@ -1878,7 +2130,7 @@ async function viewSettings() {
   <section class="card">
     <p class="muted" style="margin-top:0">Data is stored only on this device. To move an experiment or a cell expansion, open it and tap ${I.download} <b>Export</b>. For consumables use the storage export below. Then import the file on the other device.</p>
     <div class="cap-row"><button class="btn primary" id="imp">${I.upload} Import file</button></div>
-    <div class="cap-row"><button class="btn" id="expSt">${I.download} Export storage (items + history)</button></div>
+    <div class="cap-row"><button class="btn" id="expSt">${I.download} Export storage (data file or report)</button></div>
   </section>
   <div class="sec-head"><h2>This device</h2></div>
   <section class="card">
@@ -1902,7 +2154,7 @@ async function viewSettings() {
   $('#imp').onclick = importFromFile;
   $('#updSet') && ($('#updSet').onclick = applyUpdate);
   $('#chkUpd') && ($('#chkUpd').onclick = checkForUpdate);
-  $('#expSt').onclick = exportStorage;
+  $('#expSt').onclick = () => exportMenu('storage');
   $('#persist') && ($('#persist').onclick = async () => {
     const ok = await navigator.storage?.persist?.();
     toast(ok ? 'Data protected' : 'The browser declined. Installing the app usually allows it.', 4000); rerender();

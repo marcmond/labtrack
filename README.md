@@ -28,10 +28,17 @@ When the camera is used the first time, allow camera access.
 
 Data is not synced automatically.
 
-- **Experiment / cell expansion:** open it → tap the ⬇ **Export** icon (top right) → **Save file**. Copy the `.json` file to the other device (Google Drive, OneDrive, e-mail, USB) → in LabTrack there: **Settings → Import file** (or the ⬆ icon on the Experiments list).
+- **Experiment / cell expansion:** open it → tap the ⬇ **Export** icon (top right) → **Data file (.json)** → **Save file**. Copy the `.json` file to the other device (Google Drive, OneDrive, e-mail, USB) → in LabTrack there: **Settings → Import file** (or the ⬆ icon on the Experiments list).
   - If the experiment doesn't exist there yet, it is added.
   - If it exists, the two are **merged**: newer info/chamber changes win, new photos are added; for the same chamber and day the newer photo is kept.
 - **Storage (consumables):** **Settings → Export storage**, then import the same way. Items are merged (most recently changed version wins; history is combined).
+
+## Reports
+
+The ⬇ **Export** button (experiment, cell expansion, and Storage / Settings for the inventory) offers two options:
+
+- **Data file (.json)** – for moving data between devices and backups (can be imported back).
+- **Report** – a detailed, readable document with all the information (calculations, statuses, notes, history) and optionally the photos. It opens inside the app: **Print / PDF** to print or save as PDF, **HTML** to download it (opens in any browser).
 
 Tip: exporting is also your backup. Export finished experiments and keep the files in a cloud folder.
 

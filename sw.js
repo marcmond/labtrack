@@ -1,5 +1,5 @@
 // LabTrack service worker – offline app shell (stale-while-revalidate).
-const CACHE = 'labtrack-v1.4.0';
+const CACHE = 'labtrack-v1.5.0';
 const ASSETS = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 self.addEventListener('install', e => {
   // fetch fresh copies (bypass HTTP cache); wait for the user to press "Update"

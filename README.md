@@ -28,7 +28,7 @@ When the camera is used the first time, allow camera access.
 
 Data is not synced automatically.
 
-- **Experiment:** open it → tap the ⬇ **Export** icon (top right) → **Save file**. Copy the `.json` file to the other device (Google Drive, OneDrive, e-mail, USB) → in LabTrack there: **Settings → Import file** (or the ⬆ icon on the Experiments list).
+- **Experiment / cell expansion:** open it → tap the ⬇ **Export** icon (top right) → **Save file**. Copy the `.json` file to the other device (Google Drive, OneDrive, e-mail, USB) → in LabTrack there: **Settings → Import file** (or the ⬆ icon on the Experiments list).
   - If the experiment doesn't exist there yet, it is added.
   - If it exists, the two are **merged**: newer info/chamber changes win, new photos are added; for the same chamber and day the newer photo is kept.
 - **Storage (consumables):** **Settings → Export storage**, then import the same way. Items are merged (most recently changed version wins; history is combined).
@@ -50,6 +50,9 @@ If you receive new app files, upload them to the same GitHub repository (overwri
 | Add chip | Adds one or more chips named A, B, C… (AA after Z), each with chambers 1–3 and a condition. ✎ to edit or delete a chip |
 | Medium change (COPD) | Enter CSE absorbance → CSE fraction = 0.07 / absorbance. Per condition (chips × 1 mL, editable) shows CSE, each drug (from its dilution) and base medium (the rest), plus the base-medium recipe scaled to the volume needed. Chips whose 3 chambers all failed are excluded by default |
 | Staining | Chambers to stain (default = non-failed chambers), 100 µL each (+ optional extra %). Calculates blocking (Goat Serum 5 %, Tween-20 0.1 %, PBS), primary and secondary solutions (Goat Serum 0.5 %, up to 3 antibodies from Storage category *Antibodies*, PBS). Can deduct antibody volumes from Storage (items with unit µL or mL). Imaging table (405/477/545/637 nm: marker, laser %, exposure ms) can be filled later |
+| Cell expansion (tab) | **New expansion**: cell type, lot, cells in vial, seeding efficiency %, viability %, number of flasks, flask type, starting passage, seeding date/time. Each flask has daily photos (Day = days since that passage was seeded) |
+| Split / passage | Harvest date/time, total harvested, frozen, used (0), thrown away (0), optional viability at harvest, number of new flasks. Remaining cells are split equally (editable per flask – must add up). 0 flasks finishes the expansion. **Undo last split** available |
+| Expansion statistics | Per passage and overall, **raw** and **corrected**: N₀, fold expansion, population doublings, doubling time (h), growth rate μ (/day), cumulative PD, mean DT, seeding/harvest density (cells/cm²), theoretical yield, totals frozen/used/discarded. Corrected N₀ = seeded × seeding efficiency × viability (vial viability for the first passage, viability at harvest for later ones, if entered) |
 | Chamber (tap a tile) | Status **OK / Low-density / Failed** (failed asks reason + day), notes, **Take photo** for the selected day (−/+ to change day), timeline. ‹ › jump to previous/next chamber |
 | Photos by day | Compare all chambers of one day side by side |
 | Photo viewer | Swipe/arrow between photos, change day, delete |

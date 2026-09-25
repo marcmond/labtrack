@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.3.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -42,6 +42,7 @@ const I = {
   upload: svg('<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>'),
   close: svg('<path d="M18 6L6 18M6 6l12 12"/>'),
   search: svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>'),
+  cells: svg('<circle cx="8" cy="9" r="4.5"/><circle cx="16.5" cy="15.5" r="4.5"/><circle cx="17" cy="5.5" r="2"/><circle cx="6" cy="18" r="1.5"/>'),
   grid: svg('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>'),
 };
 
@@ -86,9 +87,11 @@ function toast(msg, ms = 2200) {
 let dbp;
 function db() {
   if (!dbp) dbp = new Promise((res, rej) => {
-    const r = indexedDB.open('labtrack', 1);
-    r.onupgradeneeded = () => {
+    const r = indexedDB.open('labtrack', 2);
+    r.onupgradeneeded = ev => {
       const d = r.result;
+      if (ev.oldVersion < 2 && !d.objectStoreNames.contains('expansions')) d.createObjectStore('expansions', { keyPath: 'id' });
+      if (ev.oldVersion >= 1) return;
       d.createObjectStore('experiments', { keyPath: 'id' });
       d.createObjectStore('chips', { keyPath: 'id' }).createIndex('expId', 'expId');
       const p = d.createObjectStore('photos', { keyPath: 'id' });
@@ -163,7 +166,7 @@ function setTab(t) { $$('#tabs a').forEach(a => a.classList.toggle('on', a.datas
 async function route() {
   revokeURLs();
   const p = (location.hash.slice(1) || '/').split('/').filter(Boolean);
-  setTab(p[0] === 'storage' || p[0] === 'item' ? 'storage' : p[0] === 'settings' ? 'settings' : 'exp');
+  setTab(p[0] === 'storage' || p[0] === 'item' ? 'storage' : p[0] === 'settings' ? 'settings' : p[0] === 'cexp' ? 'cexp' : 'exp');
   try {
     if (!p.length) return await viewExperiments();
     if (p[0] === 'exp' && p.length === 2) return await viewExperiment(p[1]);
@@ -171,6 +174,10 @@ async function route() {
     if (p[0] === 'exp' && p[2] === 'day') return await viewDay(p[1], +p[3]);
     if (p[0] === 'exp' && p[2] === 'medium') return await viewMedium(p[1], p[3]);
     if (p[0] === 'exp' && p[2] === 'stain') return await viewStaining(p[1], p[3]);
+    if (p[0] === 'cexp' && p.length === 1) return await viewExpansions();
+    if (p[0] === 'cexp' && p.length === 2) return await viewExpansion(p[1]);
+    if (p[0] === 'cexp' && p[2] === 'split') return await viewSplit(p[1]);
+    if (p[0] === 'cexp' && p[2] === 'flask') return await viewFlask(p[1], p[3]);
     if (p[0] === 'storage') return await viewStorage();
     if (p[0] === 'item') return await viewItem(p[1]);
     if (p[0] === 'settings') return await viewSettings();
@@ -1376,6 +1383,7 @@ async function importFromFile() {
   try {
     if (data.format === 'labtrack-experiment') await importExperiment(data);
     else if (data.format === 'labtrack-storage') await importStorage(data);
+    else if (data.format === 'labtrack-expansion') await importExpansion(data);
     else toast('This is not a LabTrack export file', 4000);
   } catch (e) { console.error(e); toast('Import failed: ' + e.message, 5000); }
 }
@@ -1436,26 +1444,446 @@ async function importStorage(data) {
 }
 
 /* =========================================================
+   CELL EXPANSION
+   ========================================================= */
+const FLASK_AREAS = { 'T25': 25, 'T75': 75, 'T175': 175, 'T225': 225, 'Other': null };
+function parseNum(s) {
+  s = String(s ?? '').trim().replace(/\s/g, '');
+  if (!s) return NaN;
+  s = s.replace(/[x×*·]10\^?/i, 'e');
+  const commas = (s.match(/,/g) || []).length, dots = (s.match(/\./g) || []).length;
+  if (commas > 1 || (commas && dots)) s = s.replace(/,/g, '');   // 1,500,000 / 1,500.5
+  else if (commas === 1) s = s.replace(',', '.');                // 1,5 (decimal comma)
+  if ((s.match(/\./g) || []).length > 1) s = s.replace(/\./g, ''); // 1.500.000
+  const v = Number(s);
+  return isFinite(v) ? v : NaN;
+}
+const fmtCells = x => (x == null || !isFinite(x)) ? '–' : Math.abs(x) >= 1e4 ? fmtSci(x, true) : fmtN(x);
+const hoursBetween = (a, b) => (new Date(b) - new Date(a)) / 36e5;
+function nowLocal() { const d = new Date(); return `${todayISO()}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`; }
+const fmtDT = s => s ? fmtDate(s) + (s.length > 10 ? ' ' + s.slice(11, 16) : '') : '';
+const fmtH = h => (h == null || !isFinite(h)) ? '–' : `${fmtN(h)} h`;
+const fmtDur = h => (h == null || !isFinite(h)) ? '–' : `${fmtN(h / 24)} d (${Math.round(h)} h)`;
+const pLabel = p => 'P' + p.n;
+const curPassage = x => x.passages[x.passages.length - 1];
+
+function expansionStats(x) {
+  const area = FLASK_AREAS[x.flaskType] || null;
+  const rows = [];
+  let cpd = 0, cpdC = 0, yieldT = null, doneH = 0;
+  const tot = { harvested: 0, frozen: 0, used: 0, discarded: 0 };
+  x.passages.forEach((p, i) => {
+    const N0 = p.flasks.reduce((s, f) => s + (+f.seeded || 0), 0);
+    const prevViab = i === 0 ? x.viability : (x.passages[i - 1].split?.viability || 100);
+    const N0c = N0 * (x.seedingEff / 100) * (prevViab / 100);
+    const r = { p, N0, N0c, nFlasks: p.flasks.length, seedDens: area ? N0 / (p.flasks.length * area) : null };
+    if (yieldT == null) yieldT = N0;
+    const s = p.split;
+    if (s) {
+      r.h = hoursBetween(p.start, s.date);
+      r.fold = s.harvested / N0; r.foldC = s.harvested / N0c;
+      r.pd = Math.log2(r.fold); r.pdC = Math.log2(r.foldC);
+      r.dt = r.pd > 0 ? r.h / r.pd : null; r.dtC = r.pdC > 0 ? r.h / r.pdC : null;
+      r.mu = r.h > 0 ? Math.log(r.fold) / (r.h / 24) : null; r.muC = r.h > 0 ? Math.log(r.foldC) / (r.h / 24) : null;
+      cpd += r.pd; cpdC += r.pdC; r.cpd = cpd; r.cpdC = cpdC;
+      yieldT *= r.fold; r.yieldT = yieldT;
+      r.harvDens = area ? s.harvested / (p.flasks.length * area) : null;
+      doneH += r.h;
+      for (const k of Object.keys(tot)) tot[k] += +s[k] || 0;
+    } else {
+      r.h = hoursBetween(p.start, new Date());
+    }
+    rows.push(r);
+  });
+  const first = rows[0];
+  return {
+    rows, tot, area, cpd, cpdC, doneH, yieldT,
+    totalH: first ? hoursBetween(first.p.start, curPassage(x).split?.date || new Date()) : 0,
+    dt: cpd > 0 ? doneH / cpd : null, dtC: cpdC > 0 ? doneH / cpdC : null,
+    splits: rows.filter(r => r.p.split).length,
+  };
+}
+
+/* ---------------- list ---------------- */
+let cexpFilter = 'active';
+async function viewExpansions() {
+  setHeader('Cell expansion', { actions: `<button class="icon" id="impBtn" title="Import file">${I.upload}</button>` });
+  $('#impBtn').onclick = importFromFile;
+  const xs = (await all('expansions')).sort((a, b) => b.number - a.number);
+  const shown = xs.filter(x => cexpFilter === 'all' || (cexpFilter === 'active' ? x.status !== 'Finished' : x.status === 'Finished'));
+  main.innerHTML = `
+    <div class="seg" id="cxSeg">${[['active', 'Active'], ['finished', 'Finished'], ['all', 'All']].map(([k, l]) =>
+      `<button data-k="${k}" class="${cexpFilter === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    ${shown.length ? shown.map(x => {
+      const st = expansionStats(x), p = curPassage(x);
+      return `<a class="card exp-card" href="#/cexp/${x.id}">
+        <div class="row"><span class="expnum">#${pad2(x.number)}</span><span class="title">${esc(x.cellType || 'Cells')}${x.lot ? ' · lot ' + esc(x.lot) : ''}</span>
+          <span class="badge st-${x.status.toLowerCase()}">${x.status}</span></div>
+        <div class="meta">${x.status === 'Finished' ? `Ended at ${pLabel(p)}` : `<b>${pLabel(p)}</b> · day ${fmtN(Math.floor(hoursBetween(p.start, new Date()) / 24))} · ${p.flasks.length} flask${p.flasks.length === 1 ? '' : 's'}`} · started ${fmtDate(x.passages[0].start)}</div>
+        <div class="meta">${st.splits ? `CPD ${fmtN(st.cpd)} (corr. ${fmtN(st.cpdC)}) · DT ${fmtH(st.dt)} (corr. ${fmtH(st.dtC)})` : 'No split yet'}${st.tot.frozen ? ` · ${fmtCells(st.tot.frozen)} frozen` : ''}</div>
+      </a>`;
+    }).join('') : `<div class="empty">${xs.length ? 'No expansions in this view.' : 'No cell expansions yet.<br>Tap <b>New expansion</b> to start.'}</div>`}
+    <button class="fab" id="newCx">${I.plus}<span>New expansion</span></button>`;
+  $$('#cxSeg button').forEach(b => b.onclick = () => { cexpFilter = b.dataset.k; route(); });
+  $('#newCx').onclick = () => expansionDialog(null);
+}
+function cellInput(name, label, val, extra = '') {
+  return `<label>${label}<input name="${name}" data-cells inputmode="decimal" value="${val === '' || val == null ? '' : esc(val)}" ${extra} placeholder="e.g. 1500000 or 1.5e6"><small class="cellprev muted"></small></label>`;
+}
+function bindCellPreviews(root) {
+  $$('[data-cells]', root).forEach(inp => {
+    const upd = () => {
+      const v = parseNum(inp.value), prev = inp.parentElement.querySelector('.cellprev');
+      if (prev) prev.textContent = inp.value.trim() === '' ? '' : isFinite(v) ? '= ' + fmtCells(v) : 'not a number';
+      inp.setCustomValidity(inp.value.trim() !== '' && !isFinite(v) ? 'Enter a number, e.g. 1500000 or 1.5e6' : '');
+    };
+    inp.addEventListener('input', upd); upd();
+  });
+}
+async function expansionDialog(x) {
+  const isNew = !x, xs = await all('expansions');
+  const types = [...new Set(xs.map(e => e.cellType).filter(Boolean))];
+  const r = await dialog({
+    title: isNew ? 'New cell expansion' : 'Edit expansion',
+    body: `<label>Cell type<input name="cellType" list="dl-ct" required value="${esc(x?.cellType)}" placeholder="e.g. hBEC, iPSC-CM, fibroblasts"></label>
+      <datalist id="dl-ct">${types.map(t => `<option value="${esc(t)}">`).join('')}</datalist>
+      <div class="grid2">
+        <label>Lot<input name="lot" value="${esc(x?.lot)}"></label>
+        ${cellInput('vialCells', 'Cells in vial (theoretical)', x?.vialCells ?? '', 'required')}
+        <label>Seeding efficiency (%)<input name="se" type="number" step="any" min="0" max="100" inputmode="decimal" required value="${esc(x?.seedingEff ?? '')}"></label>
+        <label>Cell viability (%)<input name="viab" type="number" step="any" min="0" max="100" inputmode="decimal" required value="${esc(x?.viability ?? '')}"></label>
+        ${isNew ? `<label>Number of flasks<input name="nFlasks" type="number" min="1" step="1" inputmode="numeric" required value="1"></label>
+        <label>Starting passage (P)<input name="p0" type="number" min="0" step="1" inputmode="numeric" required value="1"></label>
+        <label>Seeding date & time<input name="start" type="datetime-local" required value="${nowLocal()}"></label>` : ''}
+        <label>Flask type<select name="flaskType">${Object.keys(FLASK_AREAS).map(k => `<option ${k === (x?.flaskType || 'T75') ? 'selected' : ''}>${k}</option>`).join('')}</select></label>
+      </div>
+      <label>Notes<textarea name="notes" rows="2">${esc(x?.notes)}</textarea></label>`,
+    actions: [{ label: 'Cancel', value: 'cancel' }, { label: isNew ? 'Create' : 'Save', value: 'ok', cls: 'primary' }],
+    onMount: d => bindCellPreviews(d),
+  });
+  if (!r.ok) return;
+  const base = { cellType: r.data.cellType.trim(), lot: r.data.lot.trim(), vialCells: parseNum(r.data.vialCells), seedingEff: +r.data.se, viability: +r.data.viab,
+    flaskType: r.data.flaskType, notes: r.data.notes.trim(), updatedAt: now() };
+  if (isNew) {
+    const n = Math.max(1, +r.data.nFlasks || 1);
+    const x2 = { id: uid(), number: xs.reduce((m, e) => Math.max(m, e.number), 0) + 1, status: 'Running', createdAt: now(), ...base,
+      passages: [{ id: uid(), n: +r.data.p0 || 0, start: r.data.start, flasks: equalFlasks(n, base.vialCells), split: null }] };
+    await put('expansions', x2); go('#/cexp/' + x2.id);
+  } else {
+    Object.assign(x, base); await put('expansions', x); rerender();
+  }
+}
+function equalFlasks(n, total, old = []) {
+  const v = splitEqual(total, n);
+  return Array.from({ length: n }, (_, i) => ({ id: old[i]?.id || uid(), name: 'F' + (i + 1), seeded: v[i], notes: old[i]?.notes || '' }));
+}
+function splitEqual(total, n) {          // whole cells, remainder spread over the first flasks
+  if (!n) return [];
+  const base = Math.floor(Math.round(total) / n), rem = Math.round(total) - base * n;
+  return Array.from({ length: n }, (_, i) => base + (i < rem ? 1 : 0));
+}
+
+/* ---------------- expansion page ---------------- */
+async function viewExpansion(id) {
+  const x = await get('expansions', id);
+  if (!x) return go('#/cexp');
+  const photos = await all('photos', 'expId', id);
+  const st = expansionStats(x), p = curPassage(x), cur = st.rows[st.rows.length - 1];
+  const latest = {};
+  for (const ph of photos) if (!latest[ph.chipId] || ph.day > latest[ph.chipId].day) latest[ph.chipId] = ph;
+  const running = x.status !== 'Finished';
+  setHeader(`#${pad2(x.number)} ${x.cellType || ''}`, {
+    back: '#/cexp',
+    actions: `<button class="icon" id="cxEdit" title="Edit">${I.edit}</button><button class="icon" id="cxExport" title="Export">${I.download}</button><button class="icon" id="cxDelete" title="Delete">${I.trash}</button>`,
+  });
+  const pr = (label, a, b) => `<tr><td>${label}</td><td class="num">${a}</td>${b === undefined ? '<td></td>' : `<td class="num">${b}</td>`}</tr>`;
+  const passageCard = r => {
+    const s = r.p.split;
+    return `<div class="card scroll">
+      <h3 class="subh" style="margin-top:0">${pLabel(r.p)} <span class="muted" style="font-weight:400">${fmtDT(r.p.start)}${s ? ' → ' + fmtDT(s.date) : ' → running'}</span></h3>
+      <div class="pills" style="margin:6px 0 8px">${r.p.flasks.map(f => `<a class="pill" href="#/cexp/${id}/flask/${f.id}">${f.name} · ${fmtCells(f.seeded)}</a>`).join('')}</div>
+      <table class="calc"><thead><tr><th>Parameter</th><th>Raw</th><th>Corrected</th></tr></thead><tbody>
+        ${pr('Cells seeded (N₀)', fmtCells(r.N0), fmtCells(r.N0c))}
+        ${r.seedDens != null ? pr('Seeding density', fmtCells(r.seedDens) + '/cm²', fmtCells(r.N0c / (r.nFlasks * st.area)) + '/cm²') : ''}
+        ${pr('Time in culture', fmtDur(r.h))}
+        ${s ? `${pr('Cells harvested (N)', fmtCells(s.harvested))}
+          ${r.harvDens != null ? pr('Harvest density', fmtCells(r.harvDens) + '/cm²') : ''}
+          ${pr('Fold expansion (N/N₀)', fmtN(r.fold) + '×', fmtN(r.foldC) + '×')}
+          ${pr('Population doublings', fmtN(r.pd), fmtN(r.pdC))}
+          ${pr('<b>Doubling time</b>', '<b>' + fmtH(r.dt) + '</b>', '<b>' + fmtH(r.dtC) + '</b>')}
+          ${pr('Growth rate μ', r.mu != null ? fmtN(r.mu) + ' /day' : '–', r.muC != null ? fmtN(r.muC) + ' /day' : '–')}
+          ${pr('Cumulative PD', fmtN(r.cpd), fmtN(r.cpdC))}
+          ${pr('Frozen / used / discarded', `${fmtCells(s.frozen)} / ${fmtCells(s.used)} / ${fmtCells(s.discarded)}`)}
+          ${s.viability ? pr('Viability at harvest', fmtN(s.viability) + ' %') : ''}` : ''}
+      </tbody></table>${s?.notes ? `<p class="muted calcnote">${esc(s.notes)}</p>` : ''}</div>`;
+  };
+  main.innerHTML = `
+  <section class="card">
+    <div class="kv"><span>Cell type · lot</span><b>${esc(x.cellType)}${x.lot ? ' · ' + esc(x.lot) : ''}</b></div>
+    <div class="kv"><span>Cells in vial</span><b>${fmtCells(x.vialCells)}</b></div>
+    <div class="kv"><span>Seeding efficiency · viability</span><b>${fmtN(x.seedingEff)} % · ${fmtN(x.viability)} %</b></div>
+    <div class="kv"><span>Flask type</span><b>${esc(x.flaskType)}${st.area ? ` (${st.area} cm²)` : ''}</b></div>
+    ${x.notes ? `<p class="muted calcnote">${esc(x.notes)}</p>` : ''}
+    <div class="stats" style="margin-top:10px">
+      <div><b>${pLabel(p)}</b><span>${running ? 'Current' : 'Last'}</span></div>
+      <div><b>${fmtN(Math.floor(st.totalH / 24))}</b><span>Days total</span></div>
+      <div><b>${st.splits ? fmtN(st.cpd) : '–'}</b><span>Cum. PD</span></div>
+      <div><b>${st.dt ? Math.round(st.dt) + ' h' : '–'}</b><span>Mean DT</span></div>
+    </div>
+  </section>
+
+  ${running ? `<div class="sec-head"><h2>${pLabel(p)} · day ${fmtN(Math.floor(cur.h / 24))}</h2><a class="btn primary" href="#/cexp/${id}/split">Split / passage</a></div>
+  <div class="chips">${p.flasks.map(f => { const ph = latest[f.id]; return `<a class="card flaskcard" href="#/cexp/${id}/flask/${f.id}">
+      <div class="chamber" style="border-color:var(--accent)">${ph ? `<img src="${url(ph.blob)}" alt=""><span class="ch-day">D${ph.day}</span>` : I.camera}<span class="ch-label">${f.name}</span></div>
+      <div class="fc-meta"><b>${f.name}</b> · ${fmtCells(f.seeded)} seeded${f.notes ? '<br><span class="muted">' + esc(f.notes) + '</span>' : ''}</div></a>`; }).join('')}</div>` : ''}
+
+  ${st.splits ? `<div class="sec-head"><h2>Overall</h2></div>
+  <div class="card scroll"><table class="calc"><thead><tr><th>Parameter</th><th>Raw</th><th>Corrected</th></tr></thead><tbody>
+    ${pr('Passages completed', st.splits)}
+    ${pr('Time (completed passages)', fmtDur(st.doneH))}
+    ${pr('Cumulative population doublings', fmtN(st.cpd), fmtN(st.cpdC))}
+    ${pr('<b>Mean doubling time</b>', '<b>' + fmtH(st.dt) + '</b>', '<b>' + fmtH(st.dtC) + '</b>')}
+    ${pr('Theoretical yield (all cells kept)', fmtCells(st.yieldT))}
+    ${pr('Total frozen', fmtCells(st.tot.frozen))}
+    ${pr('Total used', fmtCells(st.tot.used))}
+    ${pr('Total discarded', fmtCells(st.tot.discarded))}
+  </tbody></table>
+  <p class="muted calcnote">Corrected: N₀ × seeding efficiency × viability (vial viability for the first passage, viability at harvest – if entered – for later passages).</p></div>` : ''}
+
+  <div class="sec-head"><h2>Passages</h2>${st.splits ? `<button class="btn" id="undoSplit">Undo last split</button>` : ''}</div>
+  ${[...st.rows].reverse().map(passageCard).join('')}
+  ${running ? '' : `<div class="cap-row"><button class="btn" id="reopen">Reopen expansion</button></div>`}`;
+
+  $('#cxEdit').onclick = () => expansionDialog(x);
+  $('#cxExport').onclick = () => exportExpansion(id);
+  $('#cxDelete').onclick = async () => {
+    if (!await confirmDlg('Delete expansion?', `#${pad2(x.number)} ${esc(x.cellType)} and its ${photos.length} photos will be permanently deleted. Consider exporting it first.`, 'Delete', 'danger')) return;
+    await tx(['expansions', 'photos'], 'readwrite', async t => {
+      t.objectStore('expansions').delete(id);
+      const s = t.objectStore('photos'); (await reqP(s.index('expId').getAllKeys(id))).forEach(k => s.delete(k));
+    });
+    toast('Expansion deleted'); goBack('#/cexp');
+  };
+  $('#reopen') && ($('#reopen').onclick = async () => { x.status = 'Running'; x.updatedAt = now(); await put('expansions', x); rerender(); });
+  $('#undoSplit') && ($('#undoSplit').onclick = async () => {
+    const last = curPassage(x);
+    if (!last.split) {             // current passage open -> remove it and reopen previous split
+      const nPh = photos.filter(ph => last.flasks.some(f => f.id === ph.chipId)).length;
+      if (!await confirmDlg('Undo last split?', `${pLabel(last)} will be removed${nPh ? ` together with its ${nPh} flask photos` : ''} and ${pLabel(x.passages[x.passages.length - 2])} becomes the current passage again.`, 'Undo', 'danger')) return;
+      await tx(['expansions', 'photos'], 'readwrite', t => {
+        const s = t.objectStore('photos');
+        photos.filter(ph => last.flasks.some(f => f.id === ph.chipId)).forEach(ph => s.delete(ph.id));
+        x.passages.pop(); curPassage(x).split = null; x.status = 'Running'; x.updatedAt = now();
+        t.objectStore('expansions').put(x);
+      });
+    } else {                       // last passage was split into 0 flasks (expansion finished)
+      if (!await confirmDlg('Undo last split?', `The final split of ${pLabel(last)} will be removed and the expansion reopened.`, 'Undo', 'danger')) return;
+      last.split = null; x.status = 'Running'; x.updatedAt = now(); await put('expansions', x);
+    }
+    toast('Split undone'); rerender();
+  });
+}
+
+/* ---------------- split / passage ---------------- */
+async function viewSplit(id) {
+  const x = await get('expansions', id);
+  if (!x) return go('#/cexp');
+  const p = curPassage(x);
+  if (p.split) return go('#/cexp/' + id);
+  const st = expansionStats(x), r0 = st.rows[st.rows.length - 1];
+  setHeader(`Split ${pLabel(p)} → P${p.n + 1}`, { back: '#/cexp/' + id });
+  main.innerHTML = `
+  <form class="card" id="spForm">
+    <label>Harvest date & time<input type="datetime-local" name="date" required value="${nowLocal()}"></label>
+    <div class="grid2">
+      ${cellInput('harvested', 'Total cells harvested', '', 'required')}
+      ${cellInput('frozen', 'Cells frozen', '0')}
+      ${cellInput('used', 'Cells used', '0')}
+      ${cellInput('discarded', 'Cells thrown away', '0')}
+      <label>Viability at harvest (%)<input name="viability" type="number" step="any" min="0" max="100" inputmode="decimal" placeholder="optional"></label>
+      <label>Number of flasks (P${p.n + 1})<input name="nFlasks" type="number" min="0" step="1" inputmode="numeric" required value="${p.flasks.length}"></label>
+    </div>
+    <label>Notes<input name="notes"></label>
+  </form>
+  <div class="sec-head"><h2>Seeding of P${p.n + 1}</h2><button class="btn" id="spEqual" type="button">Split equally</button></div>
+  <div class="card"><div id="spAvail" class="calcnote" style="margin-bottom:8px"></div><div id="spFlasks" class="flaskdist"></div><div id="spSum" class="calcnote"></div></div>
+  <div class="sec-head"><h2>${pLabel(p)} results</h2></div>
+  <div class="card scroll" id="spRes"></div>
+  <button class="btn primary big" id="spSave">Save split</button>`;
+  const form = $('#spForm'), f = form.elements;
+  form.addEventListener('submit', ev => ev.preventDefault());
+  bindCellPreviews(form);
+  let manual = false, dist = [];
+  const avail = () => { const h = parseNum(f.harvested.value); return h - (parseNum(f.frozen.value) || 0) - (parseNum(f.used.value) || 0) - (parseNum(f.discarded.value) || 0); };
+  const drawFlasks = () => {
+    const n = Math.max(0, parseInt(f.nFlasks.value) || 0), a = avail();
+    if (!manual || dist.length !== n) { dist = splitEqual(isFinite(a) && a > 0 ? a : 0, n); manual = false; }
+    $('#spFlasks').innerHTML = dist.map((v, i) => `<label>F${i + 1}<input data-fl="${i}" data-cells inputmode="decimal" value="${v}"><small class="cellprev muted"></small></label>`).join('') || '<p class="muted">0 flasks: the expansion will be finished after this split.</p>';
+    bindCellPreviews($('#spFlasks'));
+    $$('#spFlasks [data-fl]').forEach(inp => inp.addEventListener('input', () => { manual = true; dist[+inp.dataset.fl] = parseNum(inp.value) || 0; summary(); }));
+    summary();
+  };
+  const summary = () => {
+    const a = avail(), sum = dist.reduce((s, v) => s + v, 0);
+    $('#spAvail').innerHTML = isFinite(a) ? (a < 0 ? '<span style="color:var(--danger)">Frozen + used + thrown away exceed the harvested cells</span>'
+      : `Cells to seed (harvested − frozen − used − thrown away): <b>${fmtCells(a)}</b>`) : 'Enter the total cells harvested.';
+    const ok = !dist.length || (isFinite(a) && Math.abs(sum - a) <= Math.max(1, a * 0.001));
+    $('#spSum').innerHTML = dist.length ? `In flasks: <b>${fmtCells(sum)}</b>${ok ? ' ✓' : ` <span style="color:var(--danger)">≠ ${fmtCells(a)} (difference ${fmtCells(sum - a)})</span>`}` : '';
+    // results preview
+    const H = parseNum(f.harvested.value), h = hoursBetween(p.start, f.date.value);
+    if (!(H > 0) || !(h > 0)) { $('#spRes').innerHTML = `<p class="muted" style="margin:0">${h > 0 ? 'Enter the cells harvested.' : 'Harvest date must be after the seeding of ' + pLabel(p) + ' (' + fmtDT(p.start) + ').'}</p>`; return ok; }
+    const fold = H / r0.N0, foldC = H / r0.N0c, pd = Math.log2(fold), pdC = Math.log2(foldC);
+    $('#spRes').innerHTML = `<table class="calc"><thead><tr><th>Parameter</th><th>Raw</th><th>Corrected</th></tr></thead><tbody>
+      <tr><td>Cells seeded (N₀)</td><td class="num">${fmtCells(r0.N0)}</td><td class="num">${fmtCells(r0.N0c)}</td></tr>
+      <tr><td>Time in culture</td><td class="num">${fmtDur(h)}</td><td></td></tr>
+      <tr><td>Fold expansion</td><td class="num">${fmtN(fold)}×</td><td class="num">${fmtN(foldC)}×</td></tr>
+      <tr><td>Population doublings</td><td class="num">${fmtN(pd)}</td><td class="num">${fmtN(pdC)}</td></tr>
+      <tr><td><b>Doubling time</b></td><td class="num"><b>${pd > 0 ? fmtH(h / pd) : '–'}</b></td><td class="num"><b>${pdC > 0 ? fmtH(h / pdC) : '–'}</b></td></tr>
+    </tbody></table>`;
+    return ok;
+  };
+  form.addEventListener('input', ev => { if (['nFlasks', 'harvested', 'frozen', 'used', 'discarded'].includes(ev.target.name)) { if (ev.target.name === 'nFlasks') manual = false; if (!manual) drawFlasks(); else summary(); } else summary(); });
+  $('#spEqual').onclick = () => { manual = false; drawFlasks(); };
+  drawFlasks();
+  $('#spSave').onclick = async () => {
+    if (!form.reportValidity()) return;
+    const a = avail(), n = Math.max(0, parseInt(f.nFlasks.value) || 0);
+    if (!(parseNum(f.harvested.value) > 0)) { toast('Enter the total cells harvested', 3000); return; }
+    if (hoursBetween(p.start, f.date.value) <= 0) { toast('Harvest date must be after the passage seeding date', 3000); return; }
+    if (a < 0) { toast('Frozen + used + thrown away exceed the harvested cells', 3500); return; }
+    if (!summary()) { toast('The cells in the flasks must add up to the cells to seed', 3500); return; }
+    if (n === 0 && !await confirmDlg('Finish expansion?', 'With 0 flasks no new passage is created and the expansion is marked as finished.', 'Finish')) return;
+    p.split = { date: f.date.value, harvested: parseNum(f.harvested.value), frozen: parseNum(f.frozen.value) || 0, used: parseNum(f.used.value) || 0,
+      discarded: parseNum(f.discarded.value) || 0, viability: f.viability.value === '' ? null : +f.viability.value, notes: f.notes.value.trim() };
+    if (n > 0) x.passages.push({ id: uid(), n: p.n + 1, start: f.date.value, flasks: dist.map((v, i) => ({ id: uid(), name: 'F' + (i + 1), seeded: v, notes: '' })), split: null });
+    else x.status = 'Finished';
+    x.updatedAt = now();
+    await put('expansions', x);
+    toast(n > 0 ? `Split saved – P${p.n + 1} seeded in ${n} flask${n === 1 ? '' : 's'}` : 'Expansion finished', 3000);
+    goBack('#/cexp/' + id);
+  };
+}
+
+/* ---------------- flask page (daily photos) ---------------- */
+let flaskTarget = { key: '', day: 0 };
+async function viewFlask(id, fid) {
+  const x = await get('expansions', id);
+  if (!x) return go('#/cexp');
+  const pi = x.passages.findIndex(p => p.flasks.some(fl => fl.id === fid));
+  if (pi < 0) return go('#/cexp/' + id);
+  const p = x.passages[pi], fl = p.flasks.find(q => q.id === fid), fi = p.flasks.indexOf(fl);
+  const photos = (await all('photos', 'chipId', fid)).sort((a, b) => b.day - a.day || b.createdAt - a.createdAt);
+  const start = p.start.slice(0, 10);
+  const todayDay = dayOf(start, todayISO());
+  if (flaskTarget.key !== fid) flaskTarget = { key: fid, day: todayDay };
+  const tDay = flaskTarget.day, tDate = dateForDay(start, tDay);
+  const existing = photos.find(ph => ph.day === tDay);
+  const prev = p.flasks[fi - 1], next = p.flasks[fi + 1];
+  const name = `${pLabel(p)} · ${fl.name}`;
+  setHeader(`${name} · #${pad2(x.number)}`, { back: '#/cexp/' + id });
+  main.innerHTML = `
+  <div class="chnav">
+    ${prev ? `<a class="btn" href="#/cexp/${id}/flask/${prev.id}">${I.back}${prev.name}</a>` : '<span class="ph"></span>'}
+    <div class="mid"><b>${name}</b><small>${esc(x.cellType)} · ${fmtCells(fl.seeded)} seeded ${fmtDT(p.start)}</small></div>
+    ${next ? `<a class="btn" href="#/cexp/${id}/flask/${next.id}">${next.name}${I.fwd}</a>` : '<span class="ph"></span>'}
+  </div>
+  <section class="card"><label>Flask notes<textarea id="flNotes" rows="2">${esc(fl.notes)}</textarea></label></section>
+  <section class="card">
+    <div class="daystep">
+      <button id="dMinus" aria-label="Previous day">${I.minus}</button>
+      <div class="mid"><b>Day ${tDay}</b><small>${fmtDate(tDate)}${tDay === todayDay ? ' · today' : ''}</small></div>
+      <button id="dPlus" aria-label="Next day">${I.plus}</button>
+    </div>
+    ${existing ? '<div class="warn">A photo for this day already exists – a new one will replace it.</div>' : ''}
+    <button class="btn primary big" id="snap">${I.camera} Take photo – Day ${tDay}</button>
+    <div class="cap-row"><button class="btn" id="fromFile">${I.image} From file / gallery</button></div>
+  </section>
+  <div class="sec-head"><h2>Timeline (${photos.length})</h2></div>
+  ${photos.length ? `<div class="timeline">${photos.map((ph, i) => `<button class="tl" data-i="${i}"><img src="${url(ph.blob)}" alt="" loading="lazy">
+      <div><b>Day ${ph.day}</b><small>${fmtDate(ph.date)}</small></div></button>`).join('')}</div>` : '<div class="card empty">No photos yet.</div>'}`;
+  $('#flNotes').addEventListener('change', async ev => { fl.notes = ev.target.value.trim(); x.updatedAt = now(); await put('expansions', x); toast('Notes saved'); });
+  $('#dMinus').onclick = () => { flaskTarget.day--; rerender(); };
+  $('#dPlus').onclick = () => { flaskTarget.day++; rerender(); };
+  const take = async src => {
+    try {
+      const raw = src === 'camera' ? await acquireCamera() : await pickFile({ accept: 'image/*' });
+      if (!raw) return;
+      if (existing && !await confirmDlg('Replace photo?', `${esc(name)} already has a photo for Day ${tDay}. Replace it?`, 'Replace')) return;
+      const blob = await resizeImage(raw);
+      await tx(['photos'], 'readwrite', t => {
+        const s = t.objectStore('photos'); if (existing) s.delete(existing.id);
+        s.put({ id: uid(), expId: id, chipId: fid, chamber: 1, passageId: p.id, day: tDay, date: todayISO(), blob, createdAt: now() });
+      });
+      toast(`Photo saved – ${name}, Day ${tDay} (${fmtSize(blob.size)})`); rerender();
+    } catch (err) { console.error(err); toast('Could not save photo: ' + err.message, 4000); }
+  };
+  $('#snap').onclick = () => take('camera');
+  $('#fromFile').onclick = () => take('file');
+  $$('.tl').forEach(b => b.onclick = () => openViewer(photos.map(ph => ({ ...ph, label: name })), +b.dataset.i, rerender));
+}
+
+/* ---------------- export / import ---------------- */
+async function exportExpansion(id) {
+  toast('Preparing export…', 10000);
+  const x = await get('expansions', id), photos = await all('photos', 'expId', id);
+  const parts = [JSON.stringify({ format: 'labtrack-expansion', version: 1, app: APP_VERSION, exportedAt: new Date().toISOString(), expansion: x }).slice(0, -1) + ',"photos":['];
+  for (let i = 0; i < photos.length; i++) { const { blob, ...m } = photos[i]; m.data = await blobToDataURL(blob); parts.push((i ? ',' : '') + JSON.stringify(m)); }
+  parts.push(']}');
+  $('#toast').classList.remove('show');
+  await deliverFile(new Blob(parts, { type: 'application/json' }), `LabTrack_Expansion${pad2(x.number)}_${slug(x.cellType)}_${todayISO()}.json`);
+}
+async function importExpansion(data) {
+  const inc = data.expansion, local = await get('expansions', inc.id), xs = await all('expansions');
+  const photos = data.photos.map(p => { const { data: d, ...m } = p; return { ...m, blob: dataURLToBlob(d) }; });
+  $('#toast').classList.remove('show');
+  if (!local) {
+    const clash = xs.find(e => e.number === inc.number);
+    const num = clash ? xs.reduce((m, e) => Math.max(m, e.number), 0) + 1 : inc.number;
+    if (!await confirmDlg('Import expansion?', `<b>#${pad2(inc.number)} ${esc(inc.cellType)}</b> – ${inc.passages.length} passages, ${photos.length} photos.` +
+      (clash ? `<br><br>Number #${pad2(inc.number)} is already used here, so it will be imported as <b>#${pad2(num)}</b>.` : ''), 'Import')) return;
+    inc.number = num;
+    await tx(['expansions', 'photos'], 'readwrite', t => { t.objectStore('expansions').put(inc); photos.forEach(p => t.objectStore('photos').put(p)); });
+    toast(`Imported expansion #${pad2(num)}`, 3000);
+  } else {
+    if (!await confirmDlg('Merge expansion?', `<b>#${pad2(local.number)} ${esc(local.cellType)}</b> already exists here. The most recently changed version of the passages is kept, and new photos are added.`, 'Merge')) return;
+    let nP = 0;
+    await tx(['expansions', 'photos'], 'readwrite', async t => {
+      if ((inc.updatedAt || 0) > (local.updatedAt || 0)) t.objectStore('expansions').put({ ...inc, number: local.number });
+      const ps = t.objectStore('photos'), lp = await reqP(ps.index('expId').getAll(inc.id));
+      for (const p of photos) {
+        if (lp.some(q => q.id === p.id)) continue;
+        const slot = lp.find(q => q.chipId === p.chipId && q.day === p.day);
+        if (slot) { if ((p.createdAt || 0) <= (slot.createdAt || 0)) continue; ps.delete(slot.id); }
+        ps.put(p); nP++;
+      }
+    });
+    toast(`Merged: ${nP} photos added`, 3000);
+  }
+  go('#/cexp/' + inc.id);
+}
+
+/* =========================================================
    SETTINGS
    ========================================================= */
 let installEvt = null;
 addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; if (location.hash.startsWith('#/settings')) route(); });
 async function viewSettings() {
   setHeader('Settings');
-  const [exps, photos, items] = await Promise.all([all('experiments'), tx(['photos'], 'readonly', t => reqP(t.objectStore('photos').count())), all('items')]);
+  const [exps, photos, items, xs] = await Promise.all([all('experiments'), tx(['photos'], 'readonly', t => reqP(t.objectStore('photos').count())), all('items'), all('expansions')]);
   let est = null; try { est = await navigator.storage?.estimate(); } catch { }
   let persisted = false; try { persisted = await navigator.storage?.persisted(); } catch { }
   const standalone = matchMedia('(display-mode: standalone)').matches;
   main.innerHTML = `
   <div class="sec-head"><h2>Move data between devices</h2></div>
   <section class="card">
-    <p class="muted" style="margin-top:0">Data is stored only on this device. To move an experiment, open it and tap ${I.download} <b>Export</b>. For consumables use the storage export below. Then import the file on the other device.</p>
+    <p class="muted" style="margin-top:0">Data is stored only on this device. To move an experiment or a cell expansion, open it and tap ${I.download} <b>Export</b>. For consumables use the storage export below. Then import the file on the other device.</p>
     <div class="cap-row"><button class="btn primary" id="imp">${I.upload} Import file</button></div>
     <div class="cap-row"><button class="btn" id="expSt">${I.download} Export storage (items + history)</button></div>
   </section>
   <div class="sec-head"><h2>This device</h2></div>
   <section class="card">
     <div class="kv"><span>Experiments</span><b>${exps.length}</b></div>
+    <div class="kv"><span>Cell expansions</span><b>${xs.length}</b></div>
     <div class="kv"><span>Photos</span><b>${photos}</b></div>
     <div class="kv"><span>Storage items</span><b>${items.length}</b></div>
     ${est ? `<div class="kv"><span>Space used</span><b>${fmtSize(est.usage || 0)}</b></div>` : ''}
@@ -1484,7 +1912,8 @@ async function viewSettings() {
   const tabs = $$('#tabs a');
   tabs[0].innerHTML = I.flask + '<span>Experiments</span>';
   tabs[1].innerHTML = I.box + '<span>Storage</span>';
-  tabs[2].innerHTML = I.gear + '<span>Settings</span>';
+  tabs[2].innerHTML = I.cells + '<span>Expansion</span>';
+  tabs[3].innerHTML = I.gear + '<span>Settings</span>';
   if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
   navigator.storage?.persist?.().catch(() => { });
   route();

@@ -232,3 +232,11 @@ table.calc .wrap{white-space:normal;min-width:90px}
 .cc-cnt input{width:92px;margin:0;border:0;padding:8px}
 .cc-result{margin-top:10px;font-size:14px}
 .cc-total{font-size:18px;font-weight:800;color:var(--accent);white-space:nowrap}
+
+/* v1.3 cell expansion */
+.flaskcard{padding:10px}
+.flaskcard .chamber{margin-bottom:8px}
+.fc-meta{font-size:14px}
+.flaskdist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:0 10px}
+.cellprev{display:block;font-weight:400;margin-top:2px;min-height:1em}
+.chips .flaskcard{margin:0}

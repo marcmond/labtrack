@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -1896,15 +1896,61 @@ async function viewSettings() {
       ? `<button class="btn primary big" id="install">Install LabTrack on this device</button>`
       : '<p class="muted" style="margin:0 0 8px">To install: in Chrome / Edge open the browser menu and choose <b>Install app</b> (Windows) or <b>Add to Home screen → Install</b> (Android).</p>'}
     <div class="kv"><span>Version</span><b>${APP_VERSION}</b></div>
+    ${waitingSW ? `<button class="btn primary big" id="updSet">Install new version now</button>` : `<div class="cap-row"><button class="btn" id="chkUpd">Check for updates</button></div>`}
     <div class="kv"><span>Photo size</span><b>${PHOTO_MAX} px, JPEG</b></div>
   </section>`;
   $('#imp').onclick = importFromFile;
+  $('#updSet') && ($('#updSet').onclick = applyUpdate);
+  $('#chkUpd') && ($('#chkUpd').onclick = checkForUpdate);
   $('#expSt').onclick = exportStorage;
   $('#persist') && ($('#persist').onclick = async () => {
     const ok = await navigator.storage?.persist?.();
     toast(ok ? 'Data protected' : 'The browser declined. Installing the app usually allows it.', 4000); rerender();
   });
   $('#install') && ($('#install').onclick = async () => { installEvt.prompt(); await installEvt.userChoice; installEvt = null; rerender(); });
+}
+
+/* ---------------- app updates ---------------- */
+let swReg = null, waitingSW = null, updateRequested = false;
+function setupUpdates() {
+  if (!('serviceWorker' in navigator) || location.protocol === 'file:') return;
+  navigator.serviceWorker.addEventListener('controllerchange', () => { if (updateRequested) location.reload(); });
+  navigator.serviceWorker.register('sw.js').then(reg => {
+    swReg = reg;
+    if (reg.waiting && navigator.serviceWorker.controller) showUpdateBar(reg.waiting);
+    reg.addEventListener('updatefound', () => {
+      const w = reg.installing;
+      w && w.addEventListener('statechange', () => { if (w.state === 'installed' && navigator.serviceWorker.controller) showUpdateBar(w); });
+    });
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') reg.update().catch(() => { }); });
+    setInterval(() => reg.update().catch(() => { }), 30 * 60 * 1000);
+  }).catch(e => console.warn('SW', e));
+}
+function showUpdateBar(w) {
+  waitingSW = w;
+  $('#toast').classList.remove('show');
+  let bar = $('#updBar');
+  if (!bar) {
+    bar = document.createElement('div'); bar.id = 'updBar';
+    bar.innerHTML = `<span>A new version of LabTrack is available.</span><button class="btn primary" id="updNow">Update</button><button class="icon sm" id="updLater" title="Later">${I.close}</button>`;
+    document.body.appendChild(bar);
+    $('#updNow').onclick = applyUpdate;
+    $('#updLater').onclick = () => bar.remove();
+  }
+  if (location.hash.startsWith('#/settings')) route();
+}
+function applyUpdate() {
+  if (!waitingSW) return location.reload();
+  updateRequested = true;
+  $('#updNow') && ($('#updNow').textContent = 'Updating…');
+  waitingSW.postMessage('SKIP_WAITING');
+  setTimeout(() => location.reload(), 4000);   // fallback
+}
+async function checkForUpdate() {
+  if (!swReg) { toast('Updates are not available here'); return; }
+  toast('Checking for updates…', 5000);
+  try { await swReg.update(); } catch { toast('Could not check – are you offline?', 3000); return; }
+  setTimeout(() => { if (!waitingSW && !swReg.installing) toast(`You have the latest version (${APP_VERSION})`, 3000); }, 1500);
 }
 
 /* ---------------- start ---------------- */
@@ -1914,7 +1960,7 @@ async function viewSettings() {
   tabs[1].innerHTML = I.box + '<span>Storage</span>';
   tabs[2].innerHTML = I.cells + '<span>Expansion</span>';
   tabs[3].innerHTML = I.gear + '<span>Settings</span>';
-  if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(e => console.warn('SW', e));
+  setupUpdates();
   navigator.storage?.persist?.().catch(() => { });
   route();
 })();

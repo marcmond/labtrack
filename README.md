@@ -37,7 +37,9 @@ Tip: exporting is also your backup. Export finished experiments and keep the fil
 
 ## 4. Updating the app
 
-If you receive new app files, upload them to the same GitHub repository (overwrite). Your data is not affected. The app picks up the new version the second time you open it.
+If you receive new app files, upload **all** of them to the same GitHub repository (overwrite). Your data is not affected.
+
+GitHub Pages can take a few minutes to publish. After that, when you open LabTrack (or bring it back to the foreground) a bar appears: **"A new version of LabTrack is available – Update"**. Tap **Update** and the app reloads with the new version. If you tap ×, the update is installed the next time the app is fully closed and reopened. You can also use **Settings → Check for updates**, and see the installed version there.
 
 ## Quick reference
 

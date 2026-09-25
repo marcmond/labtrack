@@ -240,3 +240,8 @@ table.calc .wrap{white-space:normal;min-width:90px}
 .flaskdist{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:0 10px}
 .cellprev{display:block;font-weight:400;margin-top:2px;min-height:1em}
 .chips .flaskcard{margin:0}
+
+/* v1.4 update bar */
+#updBar{position:fixed;left:12px;right:12px;bottom:calc(76px + env(safe-area-inset-bottom));z-index:40;display:flex;align-items:center;gap:10px;
+  background:var(--card);border:2px solid var(--accent);border-radius:14px;padding:10px 10px 10px 14px;box-shadow:0 6px 20px rgba(0,0,0,.25);max-width:560px;margin:0 auto;font-weight:600;font-size:14px}
+#updBar span{flex:1}

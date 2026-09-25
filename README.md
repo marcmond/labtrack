@@ -44,7 +44,7 @@ If you receive new app files, upload them to the same GitHub repository (overwri
 | Where | What |
 |---|---|
 | Experiments list | Active / Finished / All; **New experiment** numbers automatically (#01, #02…) and asks for the **Model** (8 defaults, or *+ New model…*) |
-| Experiment page | Title, status, seeding date (→ automatic Day N), protocol, cells harvested, notes. Chips seeded is counted automatically |
+| Experiment page | Title, status, seeding date (→ automatic Day N), protocol, notes, **cell count** (dilution factor + any number of counts → total = average × dilution factor × 10⁴). Chips seeded is counted automatically |
 | Conditions | List of conditions for the experiment; each chip is assigned one. For **Lung-COPD** each condition has CSE yes/no and one or more drugs |
 | Drugs (COPD) | Name + dilution as ratio 1:X or stock → final concentration (M…pM, mg/mL…ng/mL, %, ×) |
 | Add chip | Adds one or more chips named A, B, C… (AA after Z), each with chambers 1–3 and a condition. ✎ to edit or delete a chip |

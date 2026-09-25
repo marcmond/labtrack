@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.2.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -210,7 +210,7 @@ function expCard(e, chips) {
     <div class="row"><span class="expnum">${expNum(e)}</span><span class="title">${esc(e.title || 'Untitled')}</span>
       <span class="badge st-${e.status.toLowerCase()}">${e.status}</span></div>
     ${e.model ? `<div class="meta"><span class="tag model">${esc(e.model)}</span></div>` : ''}
-    <div class="meta">${e.seedingDate ? `Seeded ${fmtDate(e.seedingDate)}${e.status !== 'Finished' ? ` · <b>Day ${day}</b>` : ''}` : 'No seeding date'}${e.protocol ? ' · ' + esc(e.protocol) : ''}</div>
+    <div class="meta">${e.seedingDate ? `Seeded ${fmtDate(e.seedingDate)}${e.status !== 'Finished' ? ` · <b>Day ${day}</b>` : ''}` : 'No seeding date'}${e.protocol ? ' · ' + esc(e.protocol) : ''}${e.cellsHarvested ? ' · ' + esc(e.cellsHarvested) + ' cells' : ''}</div>
     <div class="meta">${chips.length} chip${chips.length === 1 ? '' : 's'} · ${ch.length} chambers${low ? ` · <span class="dot low"></span>${low} low` : ''}${failed ? ` · <span class="dot failed"></span>${failed} failed` : ''}</div>
   </a>`;
 }
@@ -270,7 +270,18 @@ async function viewExperiment(id) {
       <label>Status<select name="status">${EXP_STATUS.map(s => `<option ${s === e.status ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
       <label>Seeding date<input type="date" name="seedingDate" value="${esc(e.seedingDate)}"></label>
       <label>Protocol<input name="protocol" value="${esc(e.protocol)}"></label>
-      <label class="span2">Cells harvested<input name="cellsHarvested" value="${esc(e.cellsHarvested)}" placeholder="e.g. 2.4 × 10⁶"></label>
+    </div>
+    <div class="cellcount" id="cellCount">
+      <div class="cc-head">Cell count</div>
+      <div class="grid2">
+        <label>Dilution factor<input id="ccDil" type="number" step="any" min="0" inputmode="decimal" value="${esc(e.cellCount?.dilution ?? '')}" placeholder="e.g. 2"></label>
+        <div></div>
+      </div>
+      <div class="cc-label">Counts</div>
+      <div class="cc-counts" id="ccCounts">${(e.cellCount?.counts?.length ? e.cellCount.counts : ['']).map(v =>
+        `<span class="cc-cnt"><input data-cnt type="number" step="any" min="0" inputmode="decimal" value="${esc(v)}" placeholder="count"><button type="button" class="icon sm" data-rmcnt title="Remove">${I.close}</button></span>`).join('')}
+        <button type="button" class="btn" id="ccAdd">${I.plus} Count</button></div>
+      <div class="cc-result" id="ccRes"></div>
     </div>
     <div class="stats">
       <div><b>${today ?? '–'}</b><span>Day</span></div>
@@ -321,6 +332,34 @@ async function viewExperiment(id) {
     e[el.name] = el.value.trim(); await saveExp(e);
     if (['title', 'seedingDate', 'status'].includes(el.name)) rerender(); else toast('Saved');
   }));
+  const ccRender = () => {
+    const r = cellTotal(e.cellCount);
+    $('#ccRes').innerHTML = r ? `Average <b>${fmtN(r.avg)}</b> (${r.n} count${r.n === 1 ? '' : 's'}) × ${fmtN(r.dil)} × 10⁴ = <span class="cc-total">${fmtSci(r.total)} cells</span>`
+      : `<span class="muted">${e.cellsHarvested && !e.cellCount ? `Previously entered: <b>${esc(e.cellsHarvested)}</b>. ` : ''}Enter dilution factor and at least one count. Total = average(counts) × dilution factor × 10⁴</span>`;
+  };
+  const ccSave = async () => {
+    const counts = $$('#ccCounts [data-cnt]').map(i => i.value.trim()).filter(v => v !== '' && isFinite(+v)).map(Number);
+    e.cellCount = { dilution: $('#ccDil').value === '' ? '' : Number($('#ccDil').value), counts };
+    const r = cellTotal(e.cellCount);
+    e.cellsHarvested = r ? fmtSci(r.total, true) : '';
+    await saveExp(e); ccRender();
+  };
+  const ccBind = el => {
+    el.querySelector('[data-cnt]').addEventListener('input', () => { e.cellCount = { dilution: +$('#ccDil').value || '', counts: $$('#ccCounts [data-cnt]').map(i => i.value).filter(v => v !== '').map(Number) }; ccRender(); });
+    el.querySelector('[data-cnt]').addEventListener('change', ccSave);
+    el.querySelector('[data-cnt]').addEventListener('keydown', ev => { if (ev.key === 'Enter') { ev.preventDefault(); ccAddField(); } });
+    el.querySelector('[data-rmcnt]').onclick = () => { if ($$('#ccCounts .cc-cnt').length > 1) el.remove(); else el.querySelector('[data-cnt]').value = ''; ccSave(); };
+  };
+  const ccAddField = () => {
+    const span = document.createElement('span'); span.className = 'cc-cnt';
+    span.innerHTML = `<input data-cnt type="number" step="any" min="0" inputmode="decimal" placeholder="count"><button type="button" class="icon sm" data-rmcnt title="Remove">${I.close}</button>`;
+    $('#ccAdd').before(span); ccBind(span); span.querySelector('input').focus();
+  };
+  $$('#ccCounts .cc-cnt').forEach(ccBind);
+  $('#ccAdd').onclick = ccAddField;
+  $('#ccDil').addEventListener('input', () => { e.cellCount = { ...(e.cellCount || { counts: [] }), dilution: +$('#ccDil').value || '' }; ccRender(); });
+  $('#ccDil').addEventListener('change', ccSave);
+  ccRender();
   bindModelSelect($('#info [name=model]'), async m => { e.model = m; await saveExp(e); toast('Model: ' + m); rerender(); });
   $('#addChip').onclick = () => addChips(e, chips);
   $$('[data-editchip]').forEach(b => b.onclick = () => editChip(e, chips.find(c => c.id === b.dataset.editchip)));
@@ -495,6 +534,20 @@ async function condDialog(e, c) {
     chips.forEach(x => { x.condition = c.name; x.updatedAt = now(); t.objectStore('chips').put(x); });
   });
   return c;
+}
+function cellTotal(cc) {
+  const counts = (cc?.counts || []).filter(v => v !== '' && isFinite(v)).map(Number);
+  const dil = Number(cc?.dilution);
+  if (!counts.length || !(dil > 0)) return null;
+  const avg = counts.reduce((a, b) => a + b, 0) / counts.length;
+  return { n: counts.length, avg, dil, total: avg * dil * 1e4 };
+}
+function fmtSci(x, plain) {
+  if (!(x > 0)) return '0';
+  const ex = Math.floor(Math.log10(x)), m = x / 10 ** ex;
+  if (ex < 3) return fmtN(x);
+  const sup = String(ex).split('').map(c => '⁰¹²³⁴⁵⁶⁷⁸⁹'[c]).join('');
+  return `${m.toFixed(2)} × 10${plain ? sup : '<sup>' + ex + '</sup>'}`;
 }
 const fmtN = x => String(Number(Number(x).toPrecision(4)));
 function fmtUL(v) {

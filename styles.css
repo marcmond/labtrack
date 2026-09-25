@@ -221,3 +221,14 @@ table.imgtab input{min-width:70px}
 .abslot:last-of-type{border-bottom:0}
 table.calc .wrap{white-space:normal;min-width:90px}
 @media (max-width:480px){table.calc{font-size:13px}table.calc td,table.calc th{padding:6px 4px}}
+
+/* v1.2 cell count */
+.cellcount{background:var(--bg);border-radius:12px;padding:10px 12px 12px;margin:2px 0 12px}
+.cc-head{font-weight:700;margin-bottom:6px}
+.cellcount input{background:var(--card)}
+.cc-label{font-size:13px;color:var(--muted);font-weight:600;margin-bottom:4px}
+.cc-counts{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.cc-cnt{display:flex;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding-left:2px}
+.cc-cnt input{width:92px;margin:0;border:0;padding:8px}
+.cc-result{margin-top:10px;font-size:14px}
+.cc-total{font-size:18px;font-weight:800;color:var(--accent);white-space:nowrap}

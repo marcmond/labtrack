@@ -259,3 +259,7 @@ table.calc .wrap{white-space:normal;min-width:90px}
 .cell .ch-cond{bottom:4px}
 .chcond{display:grid;grid-template-columns:repeat(3,1fr);gap:0 8px}
 .chcond select{padding:8px 4px;font-size:14px}
+
+/* v1.7 absorbance readings */
+.absbox{background:var(--bg);border-radius:12px;padding:10px 12px 12px;margin:2px 0 12px}
+.absbox input{background:var(--card)}

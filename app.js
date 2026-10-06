@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.7.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -315,7 +315,7 @@ async function viewExperiment(id) {
 
   <div class="sec-head"><h2>Medium changes</h2><a class="btn primary" href="#/exp/${id}/medium/new">${I.plus} New medium change</a></div>
   <div class="card">${mcs.length ? mcs.map(m => `<a class="used" href="#/exp/${id}/medium/${m.id}"><span><b>${m.day != null ? 'Day ' + m.day : ''}</b> ${fmtDate(m.date)}</span>
-      <span class="muted">Abs ${m.absorbance ?? '–'} · CSE ${m.cseFraction ? fmtN(m.cseFraction * 100) + '%' : '–'}</span></a>`).join('')
+      <span class="muted">Abs ${m.absorbance != null ? fmtN(m.absorbance) : '–'} · CSE ${m.cseFraction ? fmtN(m.cseFraction * 100) + '%' : '–'}</span></a>`).join('')
     : '<div class="muted">No medium changes recorded yet.</div>'}</div>` : ''}
 
   <div class="sec-head"><h2>Stainings</h2><a class="btn primary" href="#/exp/${id}/stain/new">${I.plus} New staining</a></div>
@@ -660,6 +660,9 @@ async function viewMedium(expId, mid) {
   const conds = e.conditions;
   const activeChambers = cid => chips.reduce((t, c) => t + c.chambers.filter((ch, i) => ch.status !== 'failed' && chCondId(c, i) === cid).length, 0);
   const st = mc || { date: todayISO(), absorbance: '', volPerChip: 1, counts: {}, notes: '', countUnit: 'chamber' };
+  // readings: up to 2 CSE + 2 blank; records before v1.7 only stored the final absorbance
+  const rd = st.cseReadings ? { cse: [...st.cseReadings, '', ''], blank: [...(st.blankReadings || []), '', ''] }
+    : { cse: [st.absorbance ?? '', ''], blank: [st.absorbance != null && st.absorbance !== '' ? 0 : '', ''] };
   const oldUnit = st.countUnit !== 'chamber';                 // records saved before v1.6 counted chips
   const count = cid => st.counts?.[cid] != null ? st.counts[cid] * (oldUnit ? 3 : 1) : activeChambers(cid);
   setHeader(isNew ? 'New medium change' : 'Medium change', { back: '#/exp/' + expId });
@@ -669,9 +672,18 @@ async function viewMedium(expId, mid) {
   <form class="card" id="mform">
     <div class="grid2">
       <label>Date<input type="date" name="date" value="${esc(st.date)}" required></label>
-      <label>CSE absorbance<input name="abs" type="number" step="any" min="0" inputmode="decimal" value="${esc(st.absorbance)}" placeholder="e.g. 0.85"></label>
       <label>Volume per chip (mL)<input name="vol" type="number" step="any" min="0" inputmode="decimal" value="${esc(st.volPerChip)}" required></label>
-      <div id="csePrev" class="calcnote"></div>
+    </div>
+    <div class="absbox">
+      <div class="cc-head">CSE absorbance</div>
+      <div class="grid2">
+        <label>CSE reading 1<input name="cse1" type="number" step="any" inputmode="decimal" value="${esc(rd.cse[0])}" placeholder="e.g. 0.92"></label>
+        <label>CSE reading 2 <span style="font-weight:400">(optional)</span><input name="cse2" type="number" step="any" inputmode="decimal" value="${esc(rd.cse[1])}"></label>
+        <label>Blank reading 1<input name="blk1" type="number" step="any" inputmode="decimal" value="${esc(rd.blank[0])}" placeholder="e.g. 0.05"></label>
+        <label>Blank reading 2 <span style="font-weight:400">(optional)</span><input name="blk2" type="number" step="any" inputmode="decimal" value="${esc(rd.blank[1])}"></label>
+      </div>
+      <div id="absPrev" class="calcnote"></div>
+      <div id="csePrev" class="calcnote" style="margin-top:4px"></div>
     </div>
     ${conds.length ? `<div class="muted" style="font-size:13px;font-weight:600;margin:4px 0 6px">Chambers per condition <span style="font-weight:400">(default: non-failed chambers; volume per chamber = volume per chip ÷ 3)</span></div>
     <table class="calc"><tbody>${conds.map(c => `<tr><td><b>${esc(c.name)}</b><br><small class="muted">${esc(condDesc(e, c))}</small></td>
@@ -689,7 +701,11 @@ async function viewMedium(expId, mid) {
   form.addEventListener('submit', ev => ev.preventDefault());
   const calc = () => {
     const f = form.elements;
-    const A = parseFloat(f.abs.value), V = (parseFloat(f.vol.value) || 0) * 1000;
+    const nums = names => names.map(n => f[n].value.trim()).filter(v => v !== '' && isFinite(+v)).map(Number);
+    const cseR = nums(['cse1', 'cse2']), blkR = nums(['blk1', 'blk2']);
+    const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+    const cseAvg = cseR.length ? avg(cseR) : NaN, blkAvg = blkR.length ? avg(blkR) : NaN;
+    const A = cseR.length && blkR.length ? cseAvg - blkAvg : NaN, V = (parseFloat(f.vol.value) || 0) * 1000;
     const cseF = A > 0 ? CSE_REF / A : null;
     const cseBad = cseF != null && cseF >= 1;
     const rows = conds.map(c => {
@@ -700,11 +716,14 @@ async function viewMedium(expId, mid) {
       const medium = T - (cse || 0) - drugs.reduce((s, d) => s + (d.vol || 0), 0);
       return { condId: c.id, name: c.name, n, total: T, cse, drugs, medium };
     });
-    return { date: f.date.value, A, V, cseF, cseBad, rows, notes: f.notes.value.trim(), needsCse: conds.some(c => c.cse) };
+    return { date: f.date.value, A, cseR, blkR, cseAvg, blkAvg, V, cseF, cseBad, rows, notes: f.notes.value.trim(), needsCse: conds.some(c => c.cse) };
   };
   const render = () => {
     const r = calc();
-    $('#csePrev').innerHTML = r.cseF ? (r.cseBad ? '<span style="color:var(--danger)">Absorbance must be above 0.07</span>'
+    $('#absPrev').innerHTML = isFinite(r.A)
+      ? `Absorbance = CSE avg ${fmtN(r.cseAvg)} − blank avg ${fmtN(r.blkAvg)} = <b>${fmtN(r.A)}</b>`
+      : (r.cseR.length || r.blkR.length ? 'Enter at least one CSE and one blank reading' : '');
+    $('#csePrev').innerHTML = isFinite(r.A) && r.A <= 0 ? '<span style="color:var(--danger)">CSE average must be higher than the blank</span>' : r.cseF ? (r.cseBad ? '<span style="color:var(--danger)">Absorbance must be above 0.07</span>'
       : `CSE fraction = 0.07 / ${fmtN(r.A)} = <b>${fmtN(r.cseF)}</b> (${fmtN(r.cseF * 100)}% · ${fmtUL(r.cseF * 1000)}/mL)`) : (r.needsCse ? 'Enter the absorbance to calculate CSE' : '');
     const tot = { total: 0, cse: 0, medium: 0, drugs: {} };
     r.rows.forEach(x => { tot.total += x.total; tot.cse += x.cse || 0; tot.medium += x.medium; x.drugs.forEach(d => { tot.drugs[d.name] = (tot.drugs[d.name] || 0) + (d.vol || 0); }); });
@@ -729,10 +748,10 @@ async function viewMedium(expId, mid) {
   $('#msave').onclick = async () => {
     if (!form.reportValidity()) return;
     const r = render();
-    if (r.needsCse && (!r.cseF || r.cseBad)) { toast('Enter a valid CSE absorbance (> 0.07)', 3000); form.elements.abs.focus(); return; }
+    if (r.needsCse && (!r.cseF || r.cseBad)) { toast('Enter CSE and blank readings (CSE − blank must be > 0.07)', 3500); form.elements.cse1.focus(); return; }
     const rec = {
       id: mc?.id || uid(), date: r.date, day: e.seedingDate ? dayOf(e.seedingDate, r.date) : null,
-      absorbance: isFinite(r.A) ? r.A : null, cseFraction: r.cseF && !r.cseBad ? r.cseF : null, volPerChip: r.V / 1000, countUnit: 'chamber',
+      absorbance: isFinite(r.A) ? r.A : null, cseReadings: r.cseR, blankReadings: r.blkR, cseFraction: r.cseF && !r.cseBad ? r.cseF : null, volPerChip: r.V / 1000, countUnit: 'chamber',
       counts: Object.fromEntries(r.rows.map(x => [x.condId, x.n])),
       rows: r.rows.map(x => ({ name: x.name, n: x.n, total: x.total, cse: x.cse, drugs: x.drugs, medium: x.medium })),
       baseMediumMl: r.prep, notes: r.notes, savedAt: now(),
@@ -1987,7 +2006,9 @@ async function reportExperiment(id, withPhotos) {
       (m.rows || []).forEach(r => { tot.total += r.total || 0; tot.cse += r.cse || 0; tot.medium += r.medium || 0; });
       const k = (m.baseMediumMl || 0) * 1000 / BASE_MEDIUM_TOTAL;
       h += `<div class="block"><h3 style="margin-top:0">${m.day != null ? 'Day ' + m.day + ' · ' : ''}${fmtDate(m.date)}</h3>` + rKV([
-        ['CSE absorbance', m.absorbance ?? '–'], ['CSE fraction (0.07 / absorbance)', m.cseFraction ? `${fmtN(m.cseFraction)} (${fmtN(m.cseFraction * 100)} %)` : '–'],
+        ...(m.cseReadings ? [['CSE readings', m.cseReadings.map(fmtN).join(', ') + (m.cseReadings.length > 1 ? ` (avg ${fmtN(m.cseReadings.reduce((a, b) => a + b, 0) / m.cseReadings.length)})` : '')],
+          ['Blank readings', m.blankReadings.map(fmtN).join(', ') + (m.blankReadings.length > 1 ? ` (avg ${fmtN(m.blankReadings.reduce((a, b) => a + b, 0) / m.blankReadings.length)})` : '')]] : []),
+        ['CSE absorbance' + (m.cseReadings ? ' (CSE avg − blank avg)' : ''), m.absorbance != null ? fmtN(m.absorbance) : '–'], ['CSE fraction (0.07 / absorbance)', m.cseFraction ? `${fmtN(m.cseFraction)} (${fmtN(m.cseFraction * 100)} %)` : '–'],
         ['Volume per chip', fmtN(m.volPerChip) + ' mL'], ['Notes', nl(m.notes)],
       ]) + rTable(['Condition', { t: m.countUnit === 'chamber' ? 'Chambers' : 'Chips', n: 1 }, { t: 'Total', n: 1 }, { t: 'CSE', n: 1 }, 'Drugs', { t: 'Base medium', n: 1 }],
         (m.rows || []).map(r => [esc(r.name), r.n, fmtUL(r.total), r.cse ? fmtUL(r.cse) : '–', (r.drugs || []).map(d => `${esc(d.name)} ${fmtUL(d.vol)}`).join('<br>') || '–', `<b>${fmtUL(r.medium)}</b>`]),

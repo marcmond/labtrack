@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -305,8 +305,8 @@ async function viewExperiment(id) {
 
   <div class="sec-head"><h2>Conditions</h2><button class="btn" id="addCond">${I.plus} Condition</button></div>
   <div class="card">${e.conditions.length ? e.conditions.map(c => {
-    const n = chips.filter(x => x.conditionId === c.id).length;
-    return `<button class="used rowbtn" data-cond="${c.id}"><span><b>${esc(c.name)}</b>${copd ? ` <span class="muted">${esc(condDesc(e, c))}</span>` : ''}</span><span class="muted">${n} chip${n === 1 ? '' : 's'}</span></button>`;
+    const n = chips.reduce((t, x) => t + [0, 1, 2].filter(i => chCondId(x, i) === c.id).length, 0);
+    return `<button class="used rowbtn" data-cond="${c.id}"><span><b>${esc(c.name)}</b>${copd ? ` <span class="muted">${esc(condDesc(e, c))}</span>` : ''}</span><span class="muted">${n} chamber${n === 1 ? '' : 's'}</span></button>`;
   }).join('') : `<div class="muted">No conditions yet.${copd ? ' For COPD, define each condition with CSE and/or drugs – they drive the medium-change calculation.' : ''}</div>`}</div>
 
   ${copd ? `<div class="sec-head"><h2>Drugs</h2><button class="btn" id="addDrug">${I.plus} Drug</button></div>
@@ -384,7 +384,7 @@ function chipCard(e, c, latest) {
   const cn = condName(e, c);
   return `<div class="card">
     <div class="chip-head"><span class="chip-letter">${c.letter}</span>
-      <span class="cond">${cn ? esc(cn) : '<span class="muted">No condition set</span>'}</span>
+      <span class="cond">${chipMixed(c) ? '<span class="muted">Mixed conditions</span>' : cn ? esc(cn) : '<span class="muted">No condition set</span>'}</span>
       <button class="icon sm" data-editchip="${c.id}" title="Edit chip">${I.edit}</button></div>
     <div class="chambers">${c.chambers.map((ch, i) => {
       const n = i + 1, p = latest[c.id + '_' + n];
@@ -393,6 +393,7 @@ function chipCard(e, c, latest) {
         <span class="ch-label">${c.letter}${n}</span>
         ${p ? `<span class="ch-day">D${p.day}</span>` : ''}
         ${ch.notes ? '<span class="ch-note">✎</span>' : ''}
+        ${chipMixed(c) ? `<span class="ch-cond">${esc(chCondName(e, c, i) || '–')}</span>` : ''}
         ${ch.status === 'failed' ? '<span class="ch-fail">FAIL</span>' : ch.status === 'low' ? '<span class="ch-fail" style="background:var(--low);color:#241c00">LOW</span>' : ''}
       </a>`;
     }).join('')}</div>
@@ -406,22 +407,27 @@ async function addChips(e, chips) {
     title: 'Add chip',
     body: `<label>How many chips?<input type="number" name="n" min="1" max="52" value="1" inputmode="numeric" required></label>
       <p class="muted" id="namesPrev"></p>
-      <label>Condition<select name="cond">${condOptions(e, '')}</select></label>`,
+      <label>Condition (whole chip)<select name="cond">${condOptions(e, '')}</select></label>
+      <label class="check"><input type="checkbox" name="perch" id="perch"> Different condition per chamber</label>
+      <div id="perchBox" hidden>${chamberCondSelects(e, null)}<p class="muted calcnote" style="margin:0">Applied to chambers 1, 2, 3 of every chip added.</p></div>`,
     actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Add', value: 'ok', cls: 'primary' }],
     onMount: d => {
+      $('#perch', d).onchange = ev => { $('#perchBox', d).hidden = !ev.target.checked; };
+      $$('#perchBox select', d).forEach(sel => bindCondSelect(sel, e, d));
       const inp = $('[name=n]', d);
       const upd = () => { const n = Math.max(1, Math.min(52, +inp.value || 1)); $('#namesPrev', d).textContent = 'Will be named: ' + Array.from({ length: n }, (_, i) => letters(next + i)).join(', '); };
       inp.addEventListener('input', upd); upd();
-      bindCondSelect($('[name=cond]', d), e);
+      bindCondSelect($('[name=cond]', d), e, d);
     },
   });
   if (!r.ok) return;
   const n = Math.max(1, Math.min(52, +r.data.n || 1));
   const cond = e.conditions.find(c => c.id === r.data.cond);
+  const chc = r.data.perch ? readChamberConds(r.data, cond?.id) : [null, null, null];
   await tx(['chips', 'experiments'], 'readwrite', t => {
     for (let i = 0; i < n; i++) {
       t.objectStore('chips').put({ id: uid(), expId: e.id, idx: next + i, letter: letters(next + i), conditionId: cond?.id || null, condition: cond?.name || '', notes: '',
-        chambers: [newChamber(), newChamber(), newChamber()], createdAt: now(), updatedAt: now() });
+        chambers: chc.map(cid => ({ ...newChamber(), conditionId: cid })), createdAt: now(), updatedAt: now() });
     }
     e.updatedAt = now(); t.objectStore('experiments').put(e);
   });
@@ -431,10 +437,11 @@ async function addChips(e, chips) {
 async function editChip(e, c) {
   const r = await dialog({
     title: `Chip ${c.letter}`,
-    body: `<label>Condition<select name="cond">${condOptions(e, c.conditionId)}</select></label>
+    body: `<label>Condition (whole chip)<select name="cond">${condOptions(e, c.conditionId)}</select></label>
+      ${chamberCondSelects(e, c)}
       <label>Notes<textarea name="notes" rows="3">${esc(c.notes)}</textarea></label>`,
     actions: [{ label: 'Delete chip', value: 'delete', cls: 'danger', novalidate: true }, { label: 'Cancel', value: 'cancel' }, { label: 'Save', value: 'ok', cls: 'primary' }],
-    onMount: d => bindCondSelect($('[name=cond]', d), e),
+    onMount: d => { bindCondSelect($('[name=cond]', d), e, d); $$('.chcond select', d).forEach(sel => bindCondSelect(sel, e, d)); },
   });
   if (r.action === 'delete') {
     if (!await confirmDlg(`Delete chip ${c.letter}?`, 'The chip, its 3 chambers and all their photos will be permanently deleted.', 'Delete', 'danger')) return;
@@ -448,6 +455,7 @@ async function editChip(e, c) {
   if (!r.ok) return;
   const cond = e.conditions.find(x => x.id === r.data.cond);
   c.conditionId = cond?.id || null; c.condition = cond?.name || ''; c.notes = r.data.notes.trim(); c.updatedAt = now();
+  readChamberConds(r.data, c.conditionId).forEach((cid, i) => { c.chambers[i].conditionId = cid; });
   await put('chips', c); rerender();
 }
 
@@ -489,6 +497,17 @@ async function ensureExpShape(e, chips) {
   if (dirty || changed.length) await tx(['experiments', 'chips'], 'readwrite', t => { t.objectStore('experiments').put(e); changed.forEach(c => t.objectStore('chips').put(c)); });
 }
 const condName = (e, c) => (e.conditions || []).find(x => x.id === c.conditionId)?.name || c.condition || '';
+// chamber-level condition: a chamber can override its chip's condition
+const chCondId = (c, i) => c.chambers[i]?.conditionId || c.conditionId || null;
+const chCondName = (e, c, i) => c.chambers[i]?.conditionId ? ((e.conditions || []).find(x => x.id === c.chambers[i].conditionId)?.name || '') : condName(e, c);
+const chipMixed = c => c.chambers.some(ch => ch.conditionId && ch.conditionId !== c.conditionId);
+function chamberCondSelects(e, c) {
+  return `<div class="muted" style="font-size:13px;font-weight:600;margin:6px 0 4px">Chamber conditions</div><div class="chcond">${[0, 1, 2].map(i =>
+    `<label>${c ? c.letter : ''}${i + 1}<select name="chc${i}"><option value="">As chip</option>${e.conditions.map(x => `<option value="${x.id}" ${c?.chambers[i]?.conditionId === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="__new">+ New condition…</option></select></label>`).join('')}</div>`;
+}
+function readChamberConds(data, chipCondId) {
+  return [0, 1, 2].map(i => { const v = data['chc' + i]; return v && v !== '__new' && v !== chipCondId ? v : null; });
+}
 function condDesc(e, c) {
   const parts = [];
   if (c.cse) parts.push('CSE');
@@ -498,14 +517,14 @@ function condDesc(e, c) {
 function condOptions(e, cur) {
   return `<option value="">— none —</option>${e.conditions.map(c => `<option value="${c.id}" ${c.id === cur ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}<option value="__new">+ New condition…</option>`;
 }
-function bindCondSelect(sel, e) {
+function bindCondSelect(sel, e, scope, onPicked) {
   let prev = sel.value;
   sel.addEventListener('change', async () => {
-    if (sel.value !== '__new') { prev = sel.value; return; }
+    if (sel.value !== '__new') { prev = sel.value; onPicked && onPicked(sel.value); return; }
     const c = await condDialog(e, null);
     if (!c) { sel.value = prev; return; }
-    sel.insertBefore(new Option(c.name, c.id), sel.lastElementChild);
-    sel.value = c.id; prev = c.id;
+    for (const s2 of scope ? $$('select', scope).filter(x => [...x.options].some(o => o.value === '__new')) : [sel]) s2.insertBefore(new Option(c.name, c.id), s2.lastElementChild);
+    sel.value = c.id; prev = c.id; onPicked && onPicked(c.id);
   });
 }
 async function condDialog(e, c) {
@@ -521,12 +540,12 @@ async function condDialog(e, c) {
     actions: [...(isNew ? [] : [{ label: 'Delete', value: 'delete', cls: 'danger', novalidate: true }]), { label: 'Cancel', value: 'cancel' }, { label: 'Save', value: 'ok', cls: 'primary' }],
   });
   if (r.action === 'delete') {
-    const chips = (await all('chips', 'expId', e.id)).filter(x => x.conditionId === c.id);
-    if (!await confirmDlg('Delete condition?', `${esc(c.name)} will be removed${chips.length ? ` and ${chips.length} chip(s) will have no condition` : ''}.`, 'Delete', 'danger')) return null;
+    const chips = (await all('chips', 'expId', e.id)).filter(x => x.conditionId === c.id || x.chambers.some(ch => ch.conditionId === c.id));
+    if (!await confirmDlg('Delete condition?', `${esc(c.name)} will be removed${chips.length ? ` and the chips/chambers using it will have no condition` : ''}.`, 'Delete', 'danger')) return null;
     e.conditions = e.conditions.filter(x => x.id !== c.id);
     await tx(['experiments', 'chips'], 'readwrite', t => {
       e.updatedAt = now(); t.objectStore('experiments').put(e);
-      chips.forEach(x => { x.conditionId = null; x.condition = ''; x.updatedAt = now(); t.objectStore('chips').put(x); });
+      chips.forEach(x => { if (x.conditionId === c.id) { x.conditionId = null; x.condition = ''; } x.chambers.forEach(ch => { if (ch.conditionId === c.id) ch.conditionId = null; }); x.updatedAt = now(); t.objectStore('chips').put(x); });
     });
     return c;
   }
@@ -639,9 +658,10 @@ async function viewMedium(expId, mid) {
   const mc = isNew ? null : e.mediumChanges.find(m => m.id === mid);
   if (!isNew && !mc) return go('#/exp/' + expId);
   const conds = e.conditions;
-  const activeChips = cid => chips.filter(c => c.conditionId === cid && c.chambers.some(ch => ch.status !== 'failed')).length;
-  const st = mc || { date: todayISO(), absorbance: '', volPerChip: 1, counts: {}, notes: '' };
-  const count = cid => st.counts?.[cid] ?? activeChips(cid);
+  const activeChambers = cid => chips.reduce((t, c) => t + c.chambers.filter((ch, i) => ch.status !== 'failed' && chCondId(c, i) === cid).length, 0);
+  const st = mc || { date: todayISO(), absorbance: '', volPerChip: 1, counts: {}, notes: '', countUnit: 'chamber' };
+  const oldUnit = st.countUnit !== 'chamber';                 // records saved before v1.6 counted chips
+  const count = cid => st.counts?.[cid] != null ? st.counts[cid] * (oldUnit ? 3 : 1) : activeChambers(cid);
   setHeader(isNew ? 'New medium change' : 'Medium change', { back: '#/exp/' + expId });
   main.innerHTML = `
   ${e.model !== COPD_MODEL ? '<div class="warn">This experiment is not set to the Lung-COPD model.</div>' : ''}
@@ -653,7 +673,7 @@ async function viewMedium(expId, mid) {
       <label>Volume per chip (mL)<input name="vol" type="number" step="any" min="0" inputmode="decimal" value="${esc(st.volPerChip)}" required></label>
       <div id="csePrev" class="calcnote"></div>
     </div>
-    ${conds.length ? `<div class="muted" style="font-size:13px;font-weight:600;margin:4px 0 6px">Chips per condition <span style="font-weight:400">(default: chips with at least one non-failed chamber)</span></div>
+    ${conds.length ? `<div class="muted" style="font-size:13px;font-weight:600;margin:4px 0 6px">Chambers per condition <span style="font-weight:400">(default: non-failed chambers; volume per chamber = volume per chip ÷ 3)</span></div>
     <table class="calc"><tbody>${conds.map(c => `<tr><td><b>${esc(c.name)}</b><br><small class="muted">${esc(condDesc(e, c))}</small></td>
       <td style="width:110px"><input name="n_${c.id}" type="number" min="0" step="1" inputmode="numeric" value="${count(c.id)}"></td></tr>`).join('')}</tbody></table>` : ''}
     <label style="margin-top:10px">Notes<textarea name="notes" rows="2">${esc(st.notes)}</textarea></label>
@@ -673,7 +693,7 @@ async function viewMedium(expId, mid) {
     const cseF = A > 0 ? CSE_REF / A : null;
     const cseBad = cseF != null && cseF >= 1;
     const rows = conds.map(c => {
-      const n = Math.max(0, parseInt(f['n_' + c.id]?.value) || 0), T = n * V;
+      const n = Math.max(0, parseInt(f['n_' + c.id]?.value) || 0), T = n * V / 3;
       const cse = c.cse ? (cseF && !cseBad ? T * cseF : NaN) : 0;
       const drugs = (c.drugIds || []).map(id => e.drugs.find(d => d.id === id)).filter(Boolean)
         .map(d => { const fr = drugFraction(d); return { name: d.name, vol: fr ? T * fr : NaN }; });
@@ -690,13 +710,13 @@ async function viewMedium(expId, mid) {
     r.rows.forEach(x => { tot.total += x.total; tot.cse += x.cse || 0; tot.medium += x.medium; x.drugs.forEach(d => { tot.drugs[d.name] = (tot.drugs[d.name] || 0) + (d.vol || 0); }); });
     const block = (title, sub, lines) => `<h3 class="subh">${title} <span class="muted" style="font-weight:400">${sub}</span></h3>
       <table class="calc"><tbody>${lines.map(([n, v, b]) => `<tr><td>${n}</td><td class="num">${b ? `<b>${fmtUL(v)}</b>` : fmtUL(v)}</td></tr>`).join('')}</tbody></table>`;
-    $('#mres').innerHTML = r.rows.length ? r.rows.map(x => block(esc(x.name), `${x.n} chip${x.n === 1 ? '' : 's'} · ${fmtUL(x.total)}`, [
+    $('#mres').innerHTML = r.rows.length ? r.rows.map(x => block(esc(x.name), `${x.n} chamber${x.n === 1 ? '' : 's'} · ${fmtUL(x.total)}`, [
         ...(x.cse !== 0 ? [['CSE', x.cse, true]] : []),
         ...x.drugs.map(d => [esc(d.name), d.vol, true]),
         ['Base medium', x.medium, true],
       ])).join('') + block('Total', fmtUL(tot.total), [
         ['CSE', tot.cse], ...Object.entries(tot.drugs).map(([n, v]) => [esc(n), v]), ['Base medium', tot.medium],
-      ]) + `<p class="muted calcnote">Per chip: ${fmtN(r.V / 1000)} mL. CSE and drugs from their dilution, the rest is base medium.</p>` : '<div class="muted">No conditions.</div>';
+      ]) + `<p class="muted calcnote">Per chip: ${fmtN(r.V / 1000)} mL → per chamber: ${fmtUL(r.V / 3)}. CSE and drugs from their dilution, the rest is base medium.</p>` : '<div class="muted">No conditions.</div>';
     const prep = Math.max(1, Math.ceil(tot.medium / 1000));
     const k = prep * 1000 / BASE_MEDIUM_TOTAL;
     $('#mbase').innerHTML = `<p class="calcnote" style="margin-top:0">Needed: <b>${fmtUL(tot.medium)}</b> → prepare <b>${prep} mL</b></p>
@@ -712,7 +732,7 @@ async function viewMedium(expId, mid) {
     if (r.needsCse && (!r.cseF || r.cseBad)) { toast('Enter a valid CSE absorbance (> 0.07)', 3000); form.elements.abs.focus(); return; }
     const rec = {
       id: mc?.id || uid(), date: r.date, day: e.seedingDate ? dayOf(e.seedingDate, r.date) : null,
-      absorbance: isFinite(r.A) ? r.A : null, cseFraction: r.cseF && !r.cseBad ? r.cseF : null, volPerChip: r.V / 1000,
+      absorbance: isFinite(r.A) ? r.A : null, cseFraction: r.cseF && !r.cseBad ? r.cseF : null, volPerChip: r.V / 1000, countUnit: 'chamber',
       counts: Object.fromEntries(r.rows.map(x => [x.condId, x.n])),
       rows: r.rows.map(x => ({ name: x.name, n: x.n, total: x.total, cse: x.cse, drugs: x.drugs, medium: x.medium })),
       baseMediumMl: r.prep, notes: r.notes, savedAt: now(),
@@ -889,6 +909,7 @@ async function viewChamber(expId, chipId, n) {
   const photos = (await all('photos', 'chipId', chipId)).filter(p => p.chamber === n).sort((a, b) => b.day - a.day || b.createdAt - a.createdAt);
   const ch = chip.chambers[n - 1];
   const name = chip.letter + n;
+  await ensureExpShape(e, chips);
   const todayDay = e.seedingDate ? dayOf(e.seedingDate, todayISO()) : 0;
   const key = chipId + '_' + n;
   if (chamberTarget.key !== key) chamberTarget = { key, day: todayDay };
@@ -906,7 +927,7 @@ async function viewChamber(expId, chipId, n) {
   main.innerHTML = `
   <div class="chnav">
     ${prev ? `<a class="btn" href="${link(prev)}">${I.back}${prev.c.letter}${prev.k}</a>` : '<span class="ph"></span>'}
-    <div class="mid"><b>${name}</b><small>${esc(chip.condition || 'Chip ' + chip.letter)}</small></div>
+    <div class="mid"><b>${name}</b><small>${esc(chCondName(e, chip, n - 1) || 'No condition')}</small></div>
     ${next ? `<a class="btn" href="${link(next)}">${next.c.letter}${next.k}${I.fwd}</a>` : '<span class="ph"></span>'}
   </div>
 
@@ -914,6 +935,7 @@ async function viewChamber(expId, chipId, n) {
     <div class="seg status" id="stSeg">${Object.entries(CH_STATUS).map(([k, l]) => `<button data-s="${k}" class="${ch.status === k ? 'on' : ''}">${l}</button>`).join('')}</div>
     ${ch.status === 'failed' ? `<div class="failinfo">Failed${ch.failDay != null && ch.failDay !== '' ? ' on Day ' + esc(ch.failDay) : ''} · ${esc(ch.failReason || '—')}${ch.failNote ? ' · ' + esc(ch.failNote) : ''}
        <button class="icon sm" id="editFail" style="color:inherit;vertical-align:middle" title="Edit">${I.edit}</button></div>` : ''}
+    <label>Condition<select id="chCond"><option value="">Same as chip${condName(e, chip) ? ' (' + esc(condName(e, chip)) + ')' : ''}</option>${e.conditions.map(x => `<option value="${x.id}" ${ch.conditionId === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}<option value="__new">+ New condition…</option></select></label>
     <label>Chamber notes<textarea id="chNotes" rows="3" placeholder="Observations, morphology, beating, …">${esc(ch.notes)}</textarea></label>
   </section>
 
@@ -936,6 +958,10 @@ async function viewChamber(expId, chipId, n) {
 
   $$('#stSeg button').forEach(b => b.onclick = () => setChamberStatus(chip, n, b.dataset.s, todayDay));
   $('#editFail') && ($('#editFail').onclick = () => setChamberStatus(chip, n, 'failed', todayDay, true));
+  bindCondSelect($('#chCond'), e, null, async v => {
+    chip.chambers[n - 1].conditionId = v && v !== chip.conditionId ? v : null; chip.updatedAt = now();
+    await put('chips', chip); toast(`${name}: ${chCondName(e, chip, n - 1) || 'no condition'}`); rerender();
+  });
   $('#chNotes').addEventListener('change', async ev => {
     chip.chambers[n - 1].notes = ev.target.value.trim(); chip.updatedAt = now();
     await put('chips', chip); toast('Notes saved');
@@ -1004,7 +1030,7 @@ async function viewDay(expId, d) {
     const p = map[c.id + '_' + n], st = c.chambers[n - 1].status;
     if (!p) return `<a class="cell st-${st}" href="#/exp/${expId}/chip/${c.id}/ch/${n}">${c.letter}${n}<br>no photo</a>`;
     list.push({ ...p, label: c.letter + n });
-    return `<button class="cell st-${st}" data-i="${list.length - 1}"><img src="${url(p.blob)}" alt=""><span class="ch-label">${c.letter}${n}</span></button>`;
+    return `<button class="cell st-${st}" data-i="${list.length - 1}"><img src="${url(p.blob)}" alt=""><span class="ch-label">${c.letter}${n}</span>${e.conditions?.length ? `<span class="ch-cond">${esc(chCondName(e, c, n - 1))}</span>` : ''}</button>`;
   }).join('')}</div>`).join('')}</div>`;
   $$('.cell[data-i]').forEach(b => b.onclick = () => openViewer(list, +b.dataset.i, rerender));
 }
@@ -1942,14 +1968,14 @@ async function reportExperiment(id, withPhotos) {
     ['Counts', e.cellCount.counts.map(fmtN).join(', ')], ['Average count', fmtN(cc.avg)], ['Dilution factor', fmtN(cc.dil)],
     ['Total cells (average × dilution × 10⁴)', `<b>${fmtSci(cc.total)}</b>`],
   ]) : `<p class="muted">${e.cellsHarvested ? 'Cells harvested: ' + esc(e.cellsHarvested) : 'No cell count entered.'}</p>`);
-  h += `<h2>Conditions</h2>` + (e.conditions.length ? rTable(['Condition', ...(copd ? ['CSE', 'Drugs'] : []), 'Chips'],
+  h += `<h2>Conditions</h2>` + (e.conditions.length ? rTable(['Condition', ...(copd ? ['CSE', 'Drugs'] : []), 'Chambers'],
     e.conditions.map(c => [`<b>${esc(c.name)}</b>`, ...(copd ? [c.cse ? 'Yes' : 'No', (c.drugIds || []).map(d => esc(e.drugs.find(x => x.id === d)?.name || '')).join(', ') || '–'] : []),
-      chips.filter(x => x.conditionId === c.id).map(x => x.letter).join(', ') || '–'])) : '<p class="muted">No conditions.</p>');
+      chips.flatMap(x => [0, 1, 2].filter(i => chCondId(x, i) === c.id).map(i => x.letter + (i + 1))).join(', ') || '–'])) : '<p class="muted">No conditions.</p>');
   if (e.drugs.length) h += `<h3>Drugs</h3>` + rTable(['Drug', 'Dilution', { t: 'Per mL of medium', n: 1 }],
     e.drugs.map(d => { const f = drugFraction(d); return [esc(d.name), d.mode === 'conc' ? `${esc(d.stock)} ${d.stockUnit} → ${esc(d.final)} ${d.finalUnit} (1:${f ? fmtN(1 / f) : '?'})` : `1:${d.ratio}`, f ? fmtUL(f * 1000) : '–']; }));
   h += `<h2>Chips and chambers</h2>` + (chips.length ? rTable(['Chip', 'Condition', 'Chamber', 'Status', 'Failure', 'Notes', { t: 'Photos', n: 1 }],
     chips.flatMap(c => c.chambers.map((ch, i) => [
-      i === 0 ? `<b>${c.letter}</b>${c.notes ? '<br><span class="muted">' + esc(c.notes) + '</span>' : ''}` : '', i === 0 ? esc(condName(e, c)) : '',
+      i === 0 ? `<b>${c.letter}</b>${c.notes ? '<br><span class="muted">' + esc(c.notes) + '</span>' : ''}` : '', esc(chCondName(e, c, i)),
       c.letter + (i + 1), stBadge(ch.status),
       ch.status === 'failed' ? `${esc(ch.failReason || '')}${ch.failDay != null && ch.failDay !== '' ? ' · day ' + ch.failDay : ''}${ch.failNote ? ' · ' + esc(ch.failNote) : ''}` : '',
       nl(ch.notes), photos.filter(p => p.chipId === c.id && p.chamber === i + 1).length,
@@ -1963,7 +1989,7 @@ async function reportExperiment(id, withPhotos) {
       h += `<div class="block"><h3 style="margin-top:0">${m.day != null ? 'Day ' + m.day + ' · ' : ''}${fmtDate(m.date)}</h3>` + rKV([
         ['CSE absorbance', m.absorbance ?? '–'], ['CSE fraction (0.07 / absorbance)', m.cseFraction ? `${fmtN(m.cseFraction)} (${fmtN(m.cseFraction * 100)} %)` : '–'],
         ['Volume per chip', fmtN(m.volPerChip) + ' mL'], ['Notes', nl(m.notes)],
-      ]) + rTable(['Condition', { t: 'Chips', n: 1 }, { t: 'Total', n: 1 }, { t: 'CSE', n: 1 }, 'Drugs', { t: 'Base medium', n: 1 }],
+      ]) + rTable(['Condition', { t: m.countUnit === 'chamber' ? 'Chambers' : 'Chips', n: 1 }, { t: 'Total', n: 1 }, { t: 'CSE', n: 1 }, 'Drugs', { t: 'Base medium', n: 1 }],
         (m.rows || []).map(r => [esc(r.name), r.n, fmtUL(r.total), r.cse ? fmtUL(r.cse) : '–', (r.drugs || []).map(d => `${esc(d.name)} ${fmtUL(d.vol)}`).join('<br>') || '–', `<b>${fmtUL(r.medium)}</b>`]),
         ['Total', '', fmtUL(tot.total), fmtUL(tot.cse), '', fmtUL(tot.medium)])
         + `<p style="margin:4px 0">Base medium prepared: <b>${m.baseMediumMl} mL</b></p>`
@@ -1996,7 +2022,7 @@ async function reportExperiment(id, withPhotos) {
         const cells = [];
         for (let n = 1; n <= 3; n++) {
           const p = photos.find(x => x.day === d && x.chipId === c.id && x.chamber === n), st = c.chambers[n - 1].status;
-          cells.push(p ? `<figure class="${st}"><img src="${await blobToDataURL(p.blob)}" alt=""><figcaption><b>${c.letter}${n}</b> · ${esc(condName(e, c))}</figcaption></figure>` : `<figure class="none">${c.letter}${n} – no photo</figure>`);
+          cells.push(p ? `<figure class="${st}"><img src="${await blobToDataURL(p.blob)}" alt=""><figcaption><b>${c.letter}${n}</b> · ${esc(chCondName(e, c, n - 1))}</figcaption></figure>` : `<figure class="none">${c.letter}${n} – no photo</figure>`);
         }
         if (photos.some(x => x.day === d && x.chipId === c.id)) h += `<div class="grid">${cells.join('')}</div>`;
       }

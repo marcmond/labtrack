@@ -252,3 +252,10 @@ table.calc .wrap{white-space:normal;min-width:90px}
 .rv-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .reportview iframe{flex:1;border:0;width:100%;background:#fff}
 @media (max-width:420px){.rv-top .btn{padding:8px 10px}}
+
+/* v1.6 chamber conditions */
+.ch-cond{position:absolute;left:4px;right:4px;bottom:24px;background:rgba(15,118,110,.88);color:#fff;font-size:10.5px;font-weight:700;padding:1px 5px;border-radius:6px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center}
+.cell .ch-cond{bottom:4px}
+.chcond{display:grid;grid-template-columns:repeat(3,1fr);gap:0 8px}
+.chcond select{padding:8px 4px;font-size:14px}

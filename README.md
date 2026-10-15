@@ -38,7 +38,7 @@ Data is not synced automatically.
 The ⬇ **Export** button (experiment, cell expansion, and Storage / Settings for the inventory) offers two options:
 
 - **Data file (.json)** – for moving data between devices and backups (can be imported back).
-- **Report** – a detailed, readable document with all the information (calculations, statuses, notes, history) and optionally the photos. It opens inside the app: **Print / PDF** to print or save as PDF, **HTML** to download it (opens in any browser).
+- **Report (.pptx)** – a 16:9 PowerPoint presentation with all the information (chip map, conditions, chamber details, medium changes, stainings, consumables, expansion charts and tables, inventory) and optionally the photos – cropped photos appear cropped. Opens in PowerPoint, Google Slides or Keynote.
 
 Tip: exporting is also your backup. Export finished experiments and keep the files in a cloud folder.
 
@@ -64,7 +64,7 @@ GitHub Pages can take a few minutes to publish. After that, when you open LabTra
 | Expansion statistics | Per passage and overall, **raw** and **corrected**: N₀, fold expansion, population doublings, doubling time (h), growth rate μ (/day), cumulative PD, mean DT, seeding/harvest density (cells/cm²), theoretical yield, totals frozen/used/discarded. Corrected N₀ = seeded × seeding efficiency × viability (vial viability for the first passage, viability at harvest for later ones, if entered) |
 | Chamber (tap a tile) | Status **OK / Low-density / Failed** (failed asks reason + day), notes, **Take photo** for the selected day (−/+ to change day), timeline. ‹ › jump to previous/next chamber |
 | Photos by day | Compare all chambers of one day side by side |
-| Photo viewer | Swipe/arrow between photos, change day, delete |
+| Photo viewer | Swipe/arrow between photos, **zoom** (pinch, double-tap, mouse wheel, +/−) and pan, **crop** (✂ button, or *Crop to this view* while zoomed; Square / Whole photo / Remove crop – the original is always kept), change day, delete |
 | Storage | Search, category filter, **Low stock** / **Expiring** (≤30 days) filters. − / + ask for a quantity pre-filled with the last one used; removals can be linked to an experiment |
 | Item page | All details, minimum for low-stock alert, **Set count** for stocktakes, full history |
 

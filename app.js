@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.7.0';
+const APP_VERSION = '1.8.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -43,6 +43,7 @@ const I = {
   close: svg('<path d="M18 6L6 18M6 6l12 12"/>'),
   search: svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>'),
   cells: svg('<circle cx="8" cy="9" r="4.5"/><circle cx="16.5" cy="15.5" r="4.5"/><circle cx="17" cy="5.5" r="2"/><circle cx="6" cy="18" r="1.5"/>'),
+  crop: svg('<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>'),
   grid: svg('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>'),
 };
 
@@ -389,7 +390,7 @@ function chipCard(e, c, latest) {
     <div class="chambers">${c.chambers.map((ch, i) => {
       const n = i + 1, p = latest[c.id + '_' + n];
       return `<a class="chamber st-${ch.status}" href="#/exp/${e.id}/chip/${c.id}/ch/${n}" title="${CH_STATUS[ch.status]}">
-        ${p ? `<img src="${url(p.blob)}" alt="">` : I.camera}
+        ${p ? `<img src="${url(photoBlob(p))}" alt="">` : I.camera}
         <span class="ch-label">${c.letter}${n}</span>
         ${p ? `<span class="ch-day">D${p.day}</span>` : ''}
         ${ch.notes ? '<span class="ch-note">✎</span>' : ''}
@@ -971,7 +972,7 @@ async function viewChamber(expId, chipId, n) {
   </section>
 
   <div class="sec-head"><h2>Timeline (${photos.length})</h2></div>
-  ${photos.length ? `<div class="timeline">${photos.map((p, i) => `<button class="tl" data-i="${i}"><img src="${url(p.blob)}" alt="" loading="lazy">
+  ${photos.length ? `<div class="timeline">${photos.map((p, i) => `<button class="tl" data-i="${i}"><img src="${url(photoBlob(p))}" alt="" loading="lazy">
       <div><b>Day ${p.day}</b><small>${fmtDate(p.date)}</small></div></button>`).join('')}</div>`
     : '<div class="card empty">No photos yet.</div>'}`;
 
@@ -1049,50 +1050,127 @@ async function viewDay(expId, d) {
     const p = map[c.id + '_' + n], st = c.chambers[n - 1].status;
     if (!p) return `<a class="cell st-${st}" href="#/exp/${expId}/chip/${c.id}/ch/${n}">${c.letter}${n}<br>no photo</a>`;
     list.push({ ...p, label: c.letter + n });
-    return `<button class="cell st-${st}" data-i="${list.length - 1}"><img src="${url(p.blob)}" alt=""><span class="ch-label">${c.letter}${n}</span>${e.conditions?.length ? `<span class="ch-cond">${esc(chCondName(e, c, n - 1))}</span>` : ''}</button>`;
+    return `<button class="cell st-${st}" data-i="${list.length - 1}"><img src="${url(photoBlob(p))}" alt=""><span class="ch-label">${c.letter}${n}</span>${e.conditions?.length ? `<span class="ch-cond">${esc(chCondName(e, c, n - 1))}</span>` : ''}</button>`;
   }).join('')}</div>`).join('')}</div>`;
   $$('.cell[data-i]').forEach(b => b.onclick = () => openViewer(list, +b.dataset.i, rerender));
 }
 
 /* ---------------- full-screen photo viewer ---------------- */
+const photoBlob = p => p.cropBlob || p.blob;
 function openViewer(list, start, onChanged) {
   let i = start, changed = false, closed = false;
-  const urls = list.map(p => URL.createObjectURL(p.blob));
+  const urls = list.map(p => URL.createObjectURL(photoBlob(p)));
   const ov = document.createElement('div');
   ov.className = 'viewer';
   ov.innerHTML = `<div class="v-top"><div class="v-cap"></div>
+      <button class="icon" data-a="crop" title="Crop">${I.crop}</button>
       <button class="icon" data-a="day" title="Change day">${I.edit}</button>
       <button class="icon" data-a="del" title="Delete photo">${I.trash}</button>
       <button class="icon" data-a="close" title="Close">${I.close}</button></div>
-    <div class="v-img"><img alt=""></div>
+    <div class="v-img"><img alt="" draggable="false"></div>
+    <div class="v-zoombar" hidden><span class="v-zl"></span><button class="btn" data-a="cropview">${I.crop} Crop to this view</button><button class="btn" data-a="reset">Reset zoom</button></div>
     <button class="v-nav prev" aria-label="Previous">${I.back}</button><button class="v-nav next" aria-label="Next">${I.fwd}</button>`;
   document.body.appendChild(ov);
+  const box = $('.v-img', ov), img = $('img', box);
+  // ---- zoom / pan state (transform-origin 0 0, img fills the box with object-fit: contain)
+  let s = 1, tx = 0, ty = 0;
+  const apply = () => {
+    const W = box.clientWidth, H = box.clientHeight;
+    s = Math.min(8, Math.max(1, s));
+    tx = Math.min(0, Math.max(W - W * s, tx)); ty = Math.min(0, Math.max(H - H * s, ty));
+    img.style.transform = `translate(${tx}px,${ty}px) scale(${s})`;
+    $('.v-zoombar', ov).hidden = s <= 1.01;
+    $('.v-zl', ov).textContent = `${s.toFixed(1)}×`;
+    $$('.v-nav', ov).forEach(b => b.classList.toggle('dim', s > 1.01));
+  };
+  const zoomAt = (mx, my, ns) => { const k = Math.min(8, Math.max(1, ns)) / s; tx = mx - (mx - tx) * k; ty = my - (my - ty) * k; s *= k; apply(); };
+  const resetZoom = () => { s = 1; tx = 0; ty = 0; apply(); };
+  const rel = ev => { const r = box.getBoundingClientRect(); return [ev.clientX - r.left, ev.clientY - r.top]; };
+  const pts = new Map(); let g = null, lastTap = 0;
+  box.addEventListener('pointerdown', ev => {
+    box.setPointerCapture(ev.pointerId); pts.set(ev.pointerId, rel(ev));
+    const a = [...pts.values()];
+    if (a.length === 2) { const d = Math.hypot(a[0][0] - a[1][0], a[0][1] - a[1][1]); g = { pinch: true, d0: d, s0: s, tx0: tx, ty0: ty, m: [(a[0][0] + a[1][0]) / 2, (a[0][1] + a[1][1]) / 2] }; }
+    else if (a.length === 1) g = { pinch: false, p0: a[0], tx0: tx, ty0: ty, t: Date.now() };
+  });
+  box.addEventListener('pointermove', ev => {
+    if (!pts.has(ev.pointerId) || !g) return;
+    pts.set(ev.pointerId, rel(ev));
+    const a = [...pts.values()];
+    if (g.pinch && a.length >= 2) {
+      const d = Math.hypot(a[0][0] - a[1][0], a[0][1] - a[1][1]), ns = Math.min(8, Math.max(1, g.s0 * d / g.d0)), k = ns / g.s0;
+      s = ns; tx = g.m[0] - (g.m[0] - g.tx0) * k; ty = g.m[1] - (g.m[1] - g.ty0) * k; apply();
+    } else if (!g.pinch && s > 1.01) { tx = g.tx0 + a[0][0] - g.p0[0]; ty = g.ty0 + a[0][1] - g.p0[1]; apply(); }
+  });
+  const up = ev => {
+    if (!pts.has(ev.pointerId)) return;
+    const p = rel(ev); pts.delete(ev.pointerId);
+    if (g && !g.pinch && pts.size === 0) {
+      const dx = p[0] - g.p0[0], dy = p[1] - g.p0[1];
+      if (s <= 1.01 && Math.abs(dx) > 60 && Math.abs(dx) > Math.abs(dy)) { if (dx > 0 && i > 0) { i--; show(); } else if (dx < 0 && i < list.length - 1) { i++; show(); } }
+      else if (Math.abs(dx) < 8 && Math.abs(dy) < 8) {
+        const t = Date.now(); if (t - lastTap < 300) { s > 1.01 ? resetZoom() : zoomAt(p[0], p[1], 2.5); lastTap = 0; } else lastTap = t;
+      }
+    }
+    if (pts.size < 2 && g?.pinch) g = pts.size === 1 ? { pinch: false, p0: [...pts.values()][0], tx0: tx, ty0: ty } : null;
+    if (!pts.size) g = null;
+  };
+  box.addEventListener('pointerup', up); box.addEventListener('pointercancel', up);
+  box.addEventListener('wheel', ev => { ev.preventDefault(); const [mx, my] = rel(ev); zoomAt(mx, my, s * (ev.deltaY < 0 ? 1.2 : 1 / 1.2)); }, { passive: false });
+
   const show = () => {
     const p = list[i];
-    $('img', ov).src = urls[i];
-    $('.v-cap', ov).innerHTML = `<b>${esc(p.label)} · Day ${p.day}</b> · ${fmtDate(p.date)} · ${fmtSize(p.blob.size)}<small>${i + 1}/${list.length}</small>`;
+    img.src = urls[i]; resetZoom();
+    $('.v-cap', ov).innerHTML = `<b>${esc(p.label)} · Day ${p.day}</b> · ${fmtDate(p.date)}${p.cropBlob ? ' · <span class="v-tag">cropped</span>' : ''}<small>${i + 1}/${list.length}</small>`;
     $('.prev', ov).hidden = i === 0; $('.next', ov).hidden = i === list.length - 1;
   };
   const doClose = () => {
     if (closed) return; closed = true;
-    ov.remove(); urls.forEach(u => URL.revokeObjectURL(u));
-    removeEventListener('keydown', onKey); removeEventListener('popstate', onPop);
+    ov.remove(); urls.forEach(u => URL.revokeObjectURL(u)); $('.cropper')?.remove();
+    removeEventListener('keydown', onKey); removeEventListener('popstate', onPop); removeEventListener('resize', apply);
     if (changed) onChanged && onChanged();
   };
   const close = () => history.back();           // pops our pushed state -> onPop
   const onPop = () => doClose();
-  const onKey = ev => { if ($('dialog[open]')) return; if (ev.key === 'Escape') close(); if (ev.key === 'ArrowLeft' && i > 0) { i--; show(); } if (ev.key === 'ArrowRight' && i < list.length - 1) { i++; show(); } };
+  const onKey = ev => {
+    if ($('dialog[open]') || $('.cropper')) return;
+    if (ev.key === 'Escape') close();
+    if (ev.key === 'ArrowLeft' && i > 0) { i--; show(); } if (ev.key === 'ArrowRight' && i < list.length - 1) { i++; show(); }
+    if (ev.key === '+' || ev.key === '=') zoomAt(box.clientWidth / 2, box.clientHeight / 2, s * 1.3);
+    if (ev.key === '-') zoomAt(box.clientWidth / 2, box.clientHeight / 2, s / 1.3);
+  };
   history.pushState({ viewer: 1 }, '', location.href);
   addEventListener('popstate', onPop); addEventListener('keydown', onKey);
   $('.prev', ov).onclick = () => { if (i > 0) { i--; show(); } };
   $('.next', ov).onclick = () => { if (i < list.length - 1) { i++; show(); } };
-  let x0 = null;
-  $('.v-img', ov).addEventListener('touchstart', ev => { x0 = ev.touches.length === 1 ? ev.touches[0].clientX : null; }, { passive: true });
-  $('.v-img', ov).addEventListener('touchend', ev => {
-    if (x0 == null) return; const dx = ev.changedTouches[0].clientX - x0; x0 = null;
-    if (dx > 60 && i > 0) { i--; show(); } else if (dx < -60 && i < list.length - 1) { i++; show(); }
-  });
   $('[data-a=close]', ov).onclick = close;
+  $('[data-a=reset]', ov).onclick = resetZoom;
+  // visible part of the displayed image -> normalized rect of the displayed (possibly cropped) image
+  const visibleRect = () => {
+    const W = box.clientWidth, H = box.clientHeight, nw = img.naturalWidth, nh = img.naturalHeight;
+    const k = Math.min(W / nw, H / nh), iw = nw * k, ih = nh * k, ix = (W - iw) / 2, iy = (H - ih) / 2;
+    const x0 = Math.max(ix, -tx / s), y0 = Math.max(iy, -ty / s), x1 = Math.min(ix + iw, (W - tx) / s), y1 = Math.min(iy + ih, (H - ty) / s);
+    return { x: (x0 - ix) / iw, y: (y0 - iy) / ih, w: (x1 - x0) / iw, h: (y1 - y0) / ih };
+  };
+  const doCrop = async initView => {
+    const p = list[i];
+    // the crop is always stored relative to the ORIGINAL photo
+    const base = p.crop || { x: 0, y: 0, w: 1, h: 1 };
+    let init = p.crop || { x: 0.05, y: 0.05, w: 0.9, h: 0.9 };
+    if (initView) { const v = visibleRect(); init = { x: base.x + v.x * base.w, y: base.y + v.y * base.h, w: v.w * base.w, h: v.h * base.h }; }
+    const res = await cropEditor(p.blob, init, !!p.crop);
+    if (!res) return;
+    const rec = await get('photos', p.id);
+    if (!rec) return;
+    if (res === 'remove') { delete rec.crop; delete rec.cropBlob; }
+    else { rec.crop = res.rect; rec.cropBlob = res.blob; }
+    await put('photos', rec);
+    Object.assign(p, { crop: rec.crop, cropBlob: rec.cropBlob }); if (res === 'remove') { delete p.crop; delete p.cropBlob; }
+    URL.revokeObjectURL(urls[i]); urls[i] = URL.createObjectURL(photoBlob(p));
+    changed = true; show(); toast(res === 'remove' ? 'Crop removed – original photo restored' : 'Photo cropped (the original is kept)', 2600);
+  };
+  $('[data-a=crop]', ov).onclick = () => doCrop(false);
+  $('[data-a=cropview]', ov).onclick = () => doCrop(true);
   $('[data-a=del]', ov).onclick = async () => {
     const p = list[i];
     if (!await confirmDlg('Delete photo?', `${esc(p.label)} · Day ${p.day} will be permanently deleted.`, 'Delete', 'danger')) return;
@@ -1109,12 +1187,88 @@ function openViewer(list, start, onChanged) {
     const clash = (await all('photos', 'chipId', p.chipId)).find(x => x.chamber === p.chamber && x.day === nd && x.id !== p.id);
     if (clash && !await confirmDlg('Replace?', `There is already a photo for Day ${nd}. It will be replaced by this one.`, 'Replace', 'danger')) return;
     await tx(['photos'], 'readwrite', t => {
-      const s = t.objectStore('photos'); if (clash) s.delete(clash.id);
-      const { label, ...rec } = p; rec.day = nd; s.put(rec);
+      const st = t.objectStore('photos'); if (clash) st.delete(clash.id);
+      const { label, ...rec } = p; rec.day = nd; st.put(rec);
     });
     p.day = nd; changed = true; show(); toast('Day changed');
   };
+  addEventListener('resize', apply);
   show();
+}
+
+/* crop editor: returns { rect, blob } | 'remove' | null */
+function cropEditor(blob, init, hasCrop) {
+  return new Promise(resolve => {
+    const src = URL.createObjectURL(blob);
+    const ov = document.createElement('div');
+    ov.className = 'cropper';
+    ov.innerHTML = `<div class="cr-top"><button class="btn" data-a="cancel">Cancel</button><b class="cr-title">Crop photo</b>
+        <button class="btn primary" data-a="save">Save</button></div>
+      <div class="cr-stage"><img alt="" draggable="false"><div class="cr-rect"><span data-h="nw"></span><span data-h="ne"></span><span data-h="sw"></span><span data-h="se"></span><i class="cr-grid"></i></div></div>
+      <div class="cr-bar"><button class="btn" data-a="square">Square</button><button class="btn" data-a="full">Whole photo</button>
+        ${hasCrop ? '<button class="btn danger" data-a="remove">Remove crop</button>' : ''}<span class="cr-size muted"></span></div>`;
+    document.body.appendChild(ov);
+    const stage = $('.cr-stage', ov), img = $('img', ov), rectEl = $('.cr-rect', ov);
+    let r = { ...init }, lay = null, nw = 1, nh = 1;
+    const clampR = () => {
+      const m = 0.03;
+      r.w = Math.min(1, Math.max(m, r.w)); r.h = Math.min(1, Math.max(m, r.h));
+      r.x = Math.min(1 - r.w, Math.max(0, r.x)); r.y = Math.min(1 - r.h, Math.max(0, r.y));
+    };
+    const layout = () => {
+      const W = stage.clientWidth, H = stage.clientHeight, k = Math.min(W / nw, H / nh);
+      lay = { iw: nw * k, ih: nh * k, ix: (W - nw * k) / 2, iy: (H - nh * k) / 2 };
+      Object.assign(img.style, { left: lay.ix + 'px', top: lay.iy + 'px', width: lay.iw + 'px', height: lay.ih + 'px' });
+      draw();
+    };
+    const draw = () => {
+      if (!lay) return;
+      clampR();
+      Object.assign(rectEl.style, { left: lay.ix + r.x * lay.iw + 'px', top: lay.iy + r.y * lay.ih + 'px', width: r.w * lay.iw + 'px', height: r.h * lay.ih + 'px' });
+      $('.cr-size', ov).textContent = `${Math.round(r.w * nw)} × ${Math.round(r.h * nh)} px`;
+    };
+    img.onload = () => { nw = img.naturalWidth; nh = img.naturalHeight; layout(); };
+    img.src = src;
+    let drag = null;
+    rectEl.addEventListener('pointerdown', ev => {
+      ev.preventDefault(); rectEl.setPointerCapture(ev.pointerId);
+      drag = { h: ev.target.dataset.h || 'move', x0: ev.clientX, y0: ev.clientY, r0: { ...r } };
+    });
+    rectEl.addEventListener('pointermove', ev => {
+      if (!drag) return;
+      const dx = (ev.clientX - drag.x0) / lay.iw, dy = (ev.clientY - drag.y0) / lay.ih, o = drag.r0;
+      if (drag.h === 'move') { r.x = o.x + dx; r.y = o.y + dy; }
+      else {
+        let x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+        if (drag.h.includes('w')) x0 = Math.min(x1 - 0.03, Math.max(0, o.x + dx));
+        if (drag.h.includes('e')) x1 = Math.max(x0 + 0.03, Math.min(1, x1 + dx));
+        if (drag.h.includes('n')) y0 = Math.min(y1 - 0.03, Math.max(0, o.y + dy));
+        if (drag.h.includes('s')) y1 = Math.max(y0 + 0.03, Math.min(1, y1 + dy));
+        r = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+      }
+      draw();
+    });
+    const end = () => { drag = null; };
+    rectEl.addEventListener('pointerup', end); rectEl.addEventListener('pointercancel', end);
+    const finish = v => { removeEventListener('resize', layout); ov.remove(); URL.revokeObjectURL(src); resolve(v); };
+    $('[data-a=cancel]', ov).onclick = () => finish(null);
+    $('[data-a=full]', ov).onclick = () => { r = { x: 0, y: 0, w: 1, h: 1 }; draw(); };
+    $('[data-a=square]', ov).onclick = () => {
+      const side = Math.min(r.w * nw, r.h * nh), cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+      r = { w: side / nw, h: side / nh, x: cx - side / nw / 2, y: cy - side / nh / 2 }; draw();
+    };
+    $('[data-a=remove]', ov) && ($('[data-a=remove]', ov).onclick = () => finish('remove'));
+    $('[data-a=save]', ov).onclick = async () => {
+      clampR();
+      if (r.w > 0.995 && r.h > 0.995) return finish(hasCrop ? 'remove' : null);
+      const c = document.createElement('canvas');
+      const sx = Math.round(r.x * nw), sy = Math.round(r.y * nh), sw = Math.max(1, Math.round(r.w * nw)), sh = Math.max(1, Math.round(r.h * nh));
+      c.width = sw; c.height = sh;
+      c.getContext('2d').drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+      c.toBlob(b => finish(b ? { rect: { ...r }, blob: b } : null), 'image/jpeg', 0.9);
+    };
+    addEventListener('resize', layout);
+  });
 }
 
 /* ---------------- image capture & resize ---------------- */
@@ -1378,18 +1532,19 @@ function dataURLToBlob(d) {
   for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
   return new Blob([arr], { type: mime });
 }
-async function deliverFile(blob, name) {
-  const file = new File([blob], name, { type: 'application/json' });
+async function deliverFile(blob, name, type = 'application/json', hint) {
+  const file = new File([blob], name, { type });
   let canShare = false; try { canShare = !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch { }
   const r = await dialog({
     title: 'Export ready',
     body: `<p><b>${esc(name)}</b><br><span class="muted">${fmtSize(blob.size)}</span></p>
-      <p class="muted">Save the file (it goes to your Downloads folder), then copy it to the other device – e.g. via Google Drive, OneDrive, email or USB – and open <b>Settings → Import file</b> there.</p>`,
+      <p class="muted">${hint || 'Save the file (it goes to your Downloads folder), then copy it to the other device – e.g. via Google Drive, OneDrive, email or USB – and open <b>Settings → Import file</b> there.'}</p>`,
     actions: [{ label: 'Close', value: 'cancel' }, ...(canShare ? [{ label: 'Share…', value: 'share' }] : []), { label: 'Save file', value: 'save', cls: 'primary' }],
   });
   if (r.action === 'save') {
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
     document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 10000);
+    toast('Saved ' + name, 3000);
   } else if (r.action === 'share') {
     try { await navigator.share({ files: [file], title: name }); } catch (e) { if (e.name !== 'AbortError') toast('Sharing failed: ' + e.message, 4000); }
   }
@@ -1406,8 +1561,9 @@ async function exportExperiment(id) {
   };
   const parts = [JSON.stringify(head).slice(0, -1) + ',"photos":['];
   for (let i = 0; i < photos.length; i++) {
-    const { blob, ...meta } = photos[i];
+    const { blob, cropBlob, ...meta } = photos[i];
     meta.data = await blobToDataURL(blob);
+    if (cropBlob) meta.cropData = await blobToDataURL(cropBlob);
     parts.push((i ? ',' : '') + JSON.stringify(meta));
   }
   parts.push(']}');
@@ -1437,7 +1593,7 @@ async function importExperiment(data) {
   const inc = data.experiment;
   const local = await get('experiments', inc.id);
   const exps = await all('experiments');
-  const photos = data.photos.map(p => { const { data: d, ...m } = p; return { ...m, blob: dataURLToBlob(d) }; });
+  const photos = data.photos.map(p => { const { data: d, cropData: cd, ...m } = p; return { ...m, blob: dataURLToBlob(d), ...(cd ? { cropBlob: dataURLToBlob(cd) } : {}) }; });
   $('#toast').classList.remove('show');
   let msg;
   if (!local) {
@@ -1680,7 +1836,7 @@ async function viewExpansion(id) {
 
   ${running ? `<div class="sec-head"><h2>${pLabel(p)} · day ${fmtN(Math.floor(cur.h / 24))}</h2><a class="btn primary" href="#/cexp/${id}/split">Split / passage</a></div>
   <div class="chips">${p.flasks.map(f => { const ph = latest[f.id]; return `<a class="card flaskcard" href="#/cexp/${id}/flask/${f.id}">
-      <div class="chamber" style="border-color:var(--accent)">${ph ? `<img src="${url(ph.blob)}" alt=""><span class="ch-day">D${ph.day}</span>` : I.camera}<span class="ch-label">${f.name}</span></div>
+      <div class="chamber" style="border-color:var(--accent)">${ph ? `<img src="${url(photoBlob(ph))}" alt=""><span class="ch-day">D${ph.day}</span>` : I.camera}<span class="ch-label">${f.name}</span></div>
       <div class="fc-meta"><b>${f.name}</b> · ${fmtCells(f.seeded)} seeded${f.notes ? '<br><span class="muted">' + esc(f.notes) + '</span>' : ''}</div></a>`; }).join('')}</div>` : ''}
 
   ${st.splits ? `<div class="sec-head"><h2>Overall</h2></div>
@@ -1845,7 +2001,7 @@ async function viewFlask(id, fid) {
     <div class="cap-row"><button class="btn" id="fromFile">${I.image} From file / gallery</button></div>
   </section>
   <div class="sec-head"><h2>Timeline (${photos.length})</h2></div>
-  ${photos.length ? `<div class="timeline">${photos.map((ph, i) => `<button class="tl" data-i="${i}"><img src="${url(ph.blob)}" alt="" loading="lazy">
+  ${photos.length ? `<div class="timeline">${photos.map((ph, i) => `<button class="tl" data-i="${i}"><img src="${url(photoBlob(ph))}" alt="" loading="lazy">
       <div><b>Day ${ph.day}</b><small>${fmtDate(ph.date)}</small></div></button>`).join('')}</div>` : '<div class="card empty">No photos yet.</div>'}`;
   $('#flNotes').addEventListener('change', async ev => { fl.notes = ev.target.value.trim(); x.updatedAt = now(); await put('expansions', x); toast('Notes saved'); });
   $('#dMinus').onclick = () => { flaskTarget.day--; rerender(); };
@@ -1873,14 +2029,14 @@ async function exportExpansion(id) {
   toast('Preparing export…', 10000);
   const x = await get('expansions', id), photos = await all('photos', 'expId', id);
   const parts = [JSON.stringify({ format: 'labtrack-expansion', version: 1, app: APP_VERSION, exportedAt: new Date().toISOString(), expansion: x }).slice(0, -1) + ',"photos":['];
-  for (let i = 0; i < photos.length; i++) { const { blob, ...m } = photos[i]; m.data = await blobToDataURL(blob); parts.push((i ? ',' : '') + JSON.stringify(m)); }
+  for (let i = 0; i < photos.length; i++) { const { blob, cropBlob, ...m } = photos[i]; m.data = await blobToDataURL(blob); if (cropBlob) m.cropData = await blobToDataURL(cropBlob); parts.push((i ? ',' : '') + JSON.stringify(m)); }
   parts.push(']}');
   $('#toast').classList.remove('show');
   await deliverFile(new Blob(parts, { type: 'application/json' }), `LabTrack_Expansion${pad2(x.number)}_${slug(x.cellType)}_${todayISO()}.json`);
 }
 async function importExpansion(data) {
   const inc = data.expansion, local = await get('expansions', inc.id), xs = await all('expansions');
-  const photos = data.photos.map(p => { const { data: d, ...m } = p; return { ...m, blob: dataURLToBlob(d) }; });
+  const photos = data.photos.map(p => { const { data: d, cropData: cd, ...m } = p; return { ...m, blob: dataURLToBlob(d), ...(cd ? { cropBlob: dataURLToBlob(cd) } : {}) }; });
   $('#toast').classList.remove('show');
   if (!local) {
     const clash = xs.find(e => e.number === inc.number);
@@ -1909,63 +2065,158 @@ async function importExpansion(data) {
 }
 
 /* =========================================================
-   EXPORT CHOICE + DETAILED REPORTS
+   EXPORT CHOICE + POWERPOINT REPORTS (16:9)
    ========================================================= */
 async function exportMenu(kind, id) {
   const label = { exp: 'experiment', cexp: 'cell expansion', storage: 'storage' }[kind];
   const r = await dialog({
     title: `Export ${label}`,
     body: `<p><b>Data file (.json)</b> – to move to another device or keep as a backup. It can be imported back into LabTrack.</p>
-      <p><b>Report</b> – a readable document with all the information, to print, save as PDF or share.</p>
+      <p><b>Report (.pptx)</b> – a 16:9 PowerPoint presentation with all the information, ready to open, edit or present.</p>
       ${kind === 'storage' ? '<label class="check"><input type="checkbox" name="hist" checked> Include movement history in the report</label>'
-        : '<label class="check"><input type="checkbox" name="photos" checked> Include photos in the report</label>'}`,
-    actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Data file (.json)', value: 'json' }, { label: 'Report', value: 'report', cls: 'primary' }],
+        : '<label class="check"><input type="checkbox" name="photos" checked> Include photos in the report (cropped photos are used as cropped)</label>'}`,
+    actions: [{ label: 'Cancel', value: 'cancel' }, { label: 'Data file (.json)', value: 'json' }, { label: 'Report (.pptx)', value: 'report', cls: 'primary' }],
   });
   if (r.action === 'json') return kind === 'exp' ? exportExperiment(id) : kind === 'cexp' ? exportExpansion(id) : exportStorage();
   if (r.action !== 'report') return;
-  toast('Building report…', 20000);
+  toast('Building presentation…', 60000);
   try {
-    const rep = kind === 'exp' ? await reportExperiment(id, !!r.data.photos)
-      : kind === 'cexp' ? await reportExpansion(id, !!r.data.photos) : await reportStorage(!!r.data.hist);
+    const PptxGenJS = await loadPptx();
+    const rep = kind === 'exp' ? await deckExperiment(PptxGenJS, id, !!r.data.photos)
+      : kind === 'cexp' ? await deckExpansion(PptxGenJS, id, !!r.data.photos) : await deckStorage(PptxGenJS, !!r.data.hist);
+    const blob = await rep.pres.write({ outputType: 'blob' });
     $('#toast').classList.remove('show');
-    openReport(rep.title, rep.html, rep.file);
-  } catch (e) { console.error(e); toast('Could not build report: ' + e.message, 5000); }
+    await deliverFile(blob, rep.file, PPTX_MIME, 'Open it with PowerPoint (or Google Slides / Keynote). On Android it is saved in Downloads.');
+  } catch (e) { console.error(e); toast('Could not build the presentation: ' + e.message, 6000); }
+}
+const PPTX_MIME = 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const PPTX_CDN = 'https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.bundle.js';   // cached by sw.js for offline use
+let pptxLoading = null;
+function loadPptx() {
+  if (window.PptxGenJS) return Promise.resolve(window.PptxGenJS);
+  return pptxLoading ||= new Promise((res, rej) => {
+    const sc = document.createElement('script'); sc.src = PPTX_CDN; sc.crossOrigin = 'anonymous';
+    sc.onload = () => window.PptxGenJS ? res(window.PptxGenJS) : rej(new Error('PowerPoint library not available'));
+    sc.onerror = () => { pptxLoading = null; rej(new Error('could not load the PowerPoint library – connect to the internet once and try again')); };
+    document.head.appendChild(sc);
+  });
 }
 
-const REPORT_CSS = `
-*{box-sizing:border-box}body{font:13px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;color:#18212b;margin:0;padding:24px;background:#fff}
-.wrap{max-width:900px;margin:0 auto}
-h1{font-size:22px;margin:0 0 2px;color:#0f766e}h2{font-size:16px;margin:26px 0 8px;padding-bottom:4px;border-bottom:2px solid #0f766e;color:#0f766e}
-h3{font-size:14px;margin:16px 0 6px}.sub{color:#667085;margin:0 0 10px}
-table{width:100%;border-collapse:collapse;margin:4px 0 10px;font-size:12.5px}
-th{text-align:left;background:#eef6f5;color:#344054;font-weight:700;padding:5px 7px;border:1px solid #d9e2e8}
-td{padding:5px 7px;border:1px solid #e2e6eb;vertical-align:top}
-td.n,th.n{text-align:right;white-space:nowrap}tfoot td{font-weight:700;background:#f7f9fa}
-table.kv td:first-child{width:36%;color:#475467;font-weight:600;background:#fafbfc}
-.st{font-weight:700;padding:1px 7px;border-radius:9px;font-size:11.5px;white-space:nowrap}
-.st.ok{background:#e1f4e8;color:#1e7a45}.st.low{background:#fff3c4;color:#7a5a00}.st.failed{background:#fde2e2;color:#b42318}
-.muted{color:#667085}.note{white-space:pre-wrap}
-.block{border:1px solid #e2e6eb;border-radius:10px;padding:10px 12px;margin:10px 0;page-break-inside:avoid}
-.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0 12px}
-.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:6px 0 12px}
-figure{margin:0;page-break-inside:avoid}figure img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:6px;border:3px solid #2e9d5b;display:block}
-figure.low img{border-color:#e0b100}figure.failed img{border-color:#d64545}figure.none{border:1px dashed #cfd6dd;border-radius:6px;aspect-ratio:1;display:flex;align-items:center;justify-content:center;color:#98a2b3;font-size:11px}
-figcaption{font-size:11px;color:#475467;margin-top:2px}
-.day{page-break-inside:avoid}
-.small table{font-size:11px}.small td,.small th{padding:4px 5px}
-@page{size:A4;margin:14mm}
-@media print{body{padding:0}h2{page-break-after:avoid}}
-`;
-function reportDoc(title, body) {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${REPORT_CSS}</style></head>
-<body><div class="wrap">${body}<p class="muted" style="margin-top:30px;font-size:11px">Generated ${fmtDateTime(new Date().toISOString())} with LabTrack ${APP_VERSION}</p></div></body></html>`;
-}
-const rKV = rows => `<table class="kv"><tbody>${rows.filter(r => r && r[1] !== undefined && r[1] !== null && r[1] !== '').map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('')}</tbody></table>`;
-const rTable = (head, rows, foot) => `<table><thead><tr>${head.map(h => `<th${h.n ? ' class="n"' : ''}>${h.t ?? h}</th>`).join('')}</tr></thead><tbody>${rows.map(r => `<tr>${r.map((c, i) => `<td${head[i]?.n ? ' class="n"' : ''}>${c ?? ''}</td>`).join('')}</tr>`).join('')}</tbody>${foot ? `<tfoot><tr>${foot.map((c, i) => `<td${head[i]?.n ? ' class="n"' : ''}>${c ?? ''}</td>`).join('')}</tr></tfoot>` : ''}</table>`;
-const stBadge = s => `<span class="st ${s}">${CH_STATUS[s]}</span>`;
-const nl = s => s ? `<span class="note">${esc(s)}</span>` : '';
+/* ---- deck style (edit here to match another template) ---- */
+const PT = {
+  font: 'Calibri', dark: '0B3B3A', primary: '0F766E', accent: '14B8A6', soft: 'E6F4F2', text: '1F2933', muted: '667085', line: 'D5DEE4',
+  ok: '2E9D5B', okSoft: 'E1F4E8', low: 'E0B100', lowSoft: 'FFF3C4', failed: 'D64545', failedSoft: 'FDE2E2', white: 'FFFFFF', zebra: 'F7FAFA',
+};
+const ST_FILL = { ok: [PT.okSoft, PT.ok], low: [PT.lowSoft, PT.low], failed: [PT.failedSoft, PT.failed] };
+const clip = (s, n = 90) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const chunk = (a, n) => { const out = []; for (let k = 0; k < a.length; k += n) out.push(a.slice(k, k + n)); return out.length ? out : [[]]; };
+const um = s => String(s ?? '').replace(/<[^>]+>/g, '');   // strip any html
 
-async function reportExperiment(id, withPhotos) {
+function newDeck(PptxGenJS, docName) {
+  const pres = new PptxGenJS();
+  pres.layout = 'LAYOUT_16x9';                 // 10 × 5.625 in
+  pres.author = 'LabTrack'; pres.company = 'LabTrack'; pres.title = docName;
+  pres.theme = { headFontFace: PT.font, bodyFontFace: PT.font };
+  const foot = um(docName).replace(/&/g, 'and');
+  pres.defineSlideMaster({
+    title: 'LT_TITLE', background: { color: PT.dark },
+    objects: [
+      { placeholder: { options: { name: 'title', type: 'title', x: 0.6, y: 1.55, w: 8.8, h: 1.25, fontFace: PT.font, fontSize: 36, bold: true, color: PT.white, align: 'left', valign: 'bottom', margin: 0 }, text: '' } },
+      { placeholder: { options: { name: 'body', type: 'body', x: 0.6, y: 2.95, w: 8.8, h: 1.6, fontFace: PT.font, fontSize: 16, color: 'CFE9E5', align: 'left', valign: 'top', margin: 0 }, text: '' } },
+      { text: { text: 'LabTrack report', options: { x: 0.6, y: 5.0, w: 5, h: 0.3, fontFace: PT.font, fontSize: 10, color: '8FC9C1', margin: 0 } } },
+    ],
+  });
+  pres.defineSlideMaster({
+    title: 'LT_SECTION', background: { color: PT.primary },
+    objects: [{ placeholder: { options: { name: 'title', type: 'title', x: 0.6, y: 2.1, w: 8.8, h: 1.0, fontFace: PT.font, fontSize: 32, bold: true, color: PT.white, valign: 'middle', margin: 0 }, text: '' } }],
+  });
+  pres.defineSlideMaster({
+    title: 'LT_CONTENT', background: { color: PT.white }, margin: [0.5, 0.5, 0.45, 0.5],
+    objects: [
+      { placeholder: { options: { name: 'title', type: 'title', x: 0.5, y: 0.25, w: 9, h: 0.6, fontFace: PT.font, fontSize: 24, bold: true, color: PT.primary, align: 'left', valign: 'middle', margin: 0 }, text: '' } },
+      { text: { text: clip(foot, 80), options: { x: 0.5, y: 5.27, w: 7.5, h: 0.25, fontFace: PT.font, fontSize: 9, color: PT.muted, margin: 0 } } },
+    ],
+    slideNumber: { x: 9.0, y: 5.27, w: 0.5, h: 0.25, fontFace: PT.font, fontSize: 9, color: PT.muted, align: 'right' },
+  });
+  return pres;
+}
+function sTitle(pres, sec, title, sub) {
+  const s = pres.addSlide({ masterName: 'LT_TITLE', sectionTitle: sec });
+  s.addText(title, { placeholder: 'title' });
+  if (sub) s.addText(sub, { placeholder: 'body' });
+  return s;
+}
+function sContent(pres, sec, title) {
+  const s = pres.addSlide({ masterName: 'LT_CONTENT', sectionTitle: sec });
+  s.addText(title, { placeholder: 'title' });
+  return s;
+}
+function addSec(pres, title) { pres.addSection({ title }); return title; }
+/* table: head = [{t, w, a}] widths in inches; rows = arrays of strings or {text, color, bold, fill} */
+function pTable(slide, head, rows, { x = 0.5, y = 1.05, fontSize = 12, rowH = 0.32, foot } = {}) {
+  const cell = (c, i, extra = {}) => {
+    const o = typeof c === 'object' && c !== null ? c : { text: c };
+    return { text: um(o.text ?? ''), options: { fontFace: PT.font, fontSize, color: o.color || PT.text, bold: !!o.bold, align: head[i]?.a || 'left', valign: 'middle', fill: { color: o.fill || extra.fill || PT.white }, margin: [0.03, 0.06, 0.03, 0.06] } };
+  };
+  const data = [
+    head.map((h, i) => ({ text: h.t, options: { fontFace: PT.font, fontSize, bold: true, color: PT.white, fill: { color: PT.primary }, align: h.a || 'left', valign: 'middle', margin: [0.03, 0.06, 0.03, 0.06] } })),
+    ...rows.map((r, k) => r.map((c, i) => cell(c, i, { fill: k % 2 ? PT.zebra : PT.white }))),
+    ...(foot ? [foot.map((c, i) => { const o = cell(c, i, { fill: PT.soft }); o.options.bold = true; return o; })] : []),
+  ];
+  slide.addTable(data, { x, y, w: head.reduce((t, h) => t + h.w, 0), colW: head.map(h => h.w), rowH, border: { type: 'solid', pt: 0.75, color: PT.line } });
+}
+/* paginated table over several slides */
+function pTablePages(pres, sec, title, head, rows, opts = {}) {
+  const per = opts.per || 11;
+  const pages = chunk(rows, per);
+  pages.forEach((pg, k) => {
+    const s = sContent(pres, sec, title + (pages.length > 1 ? ` (${k + 1}/${pages.length})` : ''));
+    if (!pg.length) s.addText(opts.empty || 'Nothing recorded.', { x: 0.5, y: 1.1, w: 9, h: 0.4, fontFace: PT.font, fontSize: 14, color: PT.muted, isTextBox: true, margin: 0 });
+    else pTable(s, head, pg, { ...opts, foot: k === pages.length - 1 ? opts.foot : null });
+  });
+}
+function pStat(slide, x, y, w, value, label, color = PT.primary) {
+  slide.addShape('roundRect', { x, y, w, h: 1.05, rectRadius: 0.08, fill: { color: PT.soft }, line: { color: PT.soft } });
+  slide.addText(String(value), { x: x + 0.1, y: y + 0.08, w: w - 0.2, h: 0.55, fontFace: PT.font, fontSize: 26, bold: true, color, align: 'center', valign: 'middle', isTextBox: true, margin: 0 });
+  slide.addText(label, { x: x + 0.1, y: y + 0.63, w: w - 0.2, h: 0.32, fontFace: PT.font, fontSize: 11, color: PT.muted, align: 'center', valign: 'top', isTextBox: true, margin: 0 });
+}
+function pKV(slide, rows, { x = 0.5, y = 1.05, w = 9, kw = 2.6, fontSize = 12, rowH = 0.3 } = {}) {
+  const data = rows.filter(r => r && r[1] !== undefined && r[1] !== null && um(r[1]) !== '').map(([k, v]) => [
+    { text: um(k), options: { fontFace: PT.font, fontSize, bold: true, color: PT.text, fill: { color: PT.soft }, valign: 'middle', margin: [0.03, 0.08, 0.03, 0.08] } },
+    { text: clip(um(v), 260), options: { fontFace: PT.font, fontSize, color: PT.text, fill: { color: PT.white }, valign: 'middle', margin: [0.03, 0.08, 0.03, 0.08] } },
+  ]);
+  if (data.length) slide.addTable(data, { x, y, w, colW: [kw, w - kw], rowH, border: { type: 'solid', pt: 0.75, color: PT.line } });
+  return data.length;
+}
+/* square (or given aspect) JPEG thumbnail of a photo, centre-cropped to fill the frame */
+async function photoThumb(blob, aspect = 1, size = 640) {
+  const bmp = await createImageBitmap(blob);
+  const tw = aspect >= 1 ? size : Math.round(size * aspect), th = aspect >= 1 ? Math.round(size / aspect) : size;
+  const k = Math.max(tw / bmp.width, th / bmp.height), sw = tw / k, sh = th / k;
+  const c = document.createElement('canvas'); c.width = tw; c.height = th;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(bmp, (bmp.width - sw) / 2, (bmp.height - sh) / 2, sw, sh, 0, 0, tw, th);
+  bmp.close && bmp.close();
+  const d = c.toDataURL('image/jpeg', 0.85);
+  return d.replace(/^data:/, '');
+}
+function pPhoto(slide, data, x, y, w, h, frame, caption) {
+  if (data) slide.addImage({ data, x, y, w, h, rounding: false });
+  else slide.addShape('rect', { x, y, w, h, fill: { color: 'F2F4F7' }, line: { color: PT.line, dashType: 'dash' } });
+  slide.addShape('rect', { x, y, w, h, fill: { color: PT.white, transparency: 100 }, line: { color: frame || PT.line, width: data ? 2.25 : 0.75 } });
+  if (!data) slide.addText('no photo', { x, y: y + h / 2 - 0.15, w, h: 0.3, fontFace: PT.font, fontSize: 10, color: PT.muted, align: 'center', isTextBox: true, margin: 0 });
+  if (caption) slide.addText(caption, { x, y: y + h + 0.03, w, h: 0.26, fontFace: PT.font, fontSize: 10, color: PT.text, align: 'left', isTextBox: true, margin: 0, fit: 'shrink' });
+}
+function pLegend(slide, y = 4.9) {
+  [['ok', 'OK'], ['low', 'Low-density'], ['failed', 'Failed']].forEach(([k, l], j) => {
+    const x = 0.5 + j * 1.7;
+    slide.addShape('roundRect', { x, y: y + 0.04, w: 0.28, h: 0.2, rectRadius: 0.04, fill: { color: ST_FILL[k][0] }, line: { color: ST_FILL[k][1], width: 1.5 } });
+    slide.addText(l, { x: x + 0.36, y, w: 1.3, h: 0.28, fontFace: PT.font, fontSize: 11, color: PT.text, valign: 'middle', isTextBox: true, margin: 0 });
+  });
+}
+
+/* ---------------- experiment deck ---------------- */
+async function deckExperiment(PptxGenJS, id, withPhotos) {
   const e = await get('experiments', id);
   const [chips, photos, movs, items] = await Promise.all([all('chips', 'expId', id), all('photos', 'expId', id), all('movements', 'expId', id), all('items')]);
   chips.sort((a, b) => a.idx - b.idx);
@@ -1973,192 +2224,273 @@ async function reportExperiment(id, withPhotos) {
   const itemMap = Object.fromEntries(items.map(i => [i.id, i]));
   const allCh = chips.flatMap(c => c.chambers);
   const cnt = s => allCh.filter(c => c.status === s).length;
-  const cc = cellTotal(e.cellCount);
-  const copd = e.model === COPD_MODEL;
-  let h = `<h1>Experiment ${expNum(e)}${e.title ? ' – ' + esc(e.title) : ''}</h1><p class="sub">${esc(e.model || 'No model')} · ${e.status}</p>`;
-  h += `<h2>General information</h2>` + rKV([
-    ['Model', esc(e.model)], ['Status', e.status], ['Seeding date', fmtDate(e.seedingDate)],
-    ['Current day', e.seedingDate && e.status !== 'Finished' ? 'Day ' + dayOf(e.seedingDate, todayISO()) : ''],
-    ['Protocol', esc(e.protocol)], ['Chips seeded', chips.length],
-    ['Chambers', `${allCh.length} – ${cnt('ok')} OK, ${cnt('low')} low-density, ${cnt('failed')} failed`],
-    ['Notes', nl(e.notes)],
-  ]);
-  h += `<h2>Cell count</h2>` + (cc ? rKV([
-    ['Counts', e.cellCount.counts.map(fmtN).join(', ')], ['Average count', fmtN(cc.avg)], ['Dilution factor', fmtN(cc.dil)],
-    ['Total cells (average × dilution × 10⁴)', `<b>${fmtSci(cc.total)}</b>`],
-  ]) : `<p class="muted">${e.cellsHarvested ? 'Cells harvested: ' + esc(e.cellsHarvested) : 'No cell count entered.'}</p>`);
-  h += `<h2>Conditions</h2>` + (e.conditions.length ? rTable(['Condition', ...(copd ? ['CSE', 'Drugs'] : []), 'Chambers'],
-    e.conditions.map(c => [`<b>${esc(c.name)}</b>`, ...(copd ? [c.cse ? 'Yes' : 'No', (c.drugIds || []).map(d => esc(e.drugs.find(x => x.id === d)?.name || '')).join(', ') || '–'] : []),
-      chips.flatMap(x => [0, 1, 2].filter(i => chCondId(x, i) === c.id).map(i => x.letter + (i + 1))).join(', ') || '–'])) : '<p class="muted">No conditions.</p>');
-  if (e.drugs.length) h += `<h3>Drugs</h3>` + rTable(['Drug', 'Dilution', { t: 'Per mL of medium', n: 1 }],
-    e.drugs.map(d => { const f = drugFraction(d); return [esc(d.name), d.mode === 'conc' ? `${esc(d.stock)} ${d.stockUnit} → ${esc(d.final)} ${d.finalUnit} (1:${f ? fmtN(1 / f) : '?'})` : `1:${d.ratio}`, f ? fmtUL(f * 1000) : '–']; }));
-  h += `<h2>Chips and chambers</h2>` + (chips.length ? rTable(['Chip', 'Condition', 'Chamber', 'Status', 'Failure', 'Notes', { t: 'Photos', n: 1 }],
-    chips.flatMap(c => c.chambers.map((ch, i) => [
-      i === 0 ? `<b>${c.letter}</b>${c.notes ? '<br><span class="muted">' + esc(c.notes) + '</span>' : ''}` : '', esc(chCondName(e, c, i)),
-      c.letter + (i + 1), stBadge(ch.status),
-      ch.status === 'failed' ? `${esc(ch.failReason || '')}${ch.failDay != null && ch.failDay !== '' ? ' · day ' + ch.failDay : ''}${ch.failNote ? ' · ' + esc(ch.failNote) : ''}` : '',
-      nl(ch.notes), photos.filter(p => p.chipId === c.id && p.chamber === i + 1).length,
-    ]))) : '<p class="muted">No chips.</p>');
+  const cc = cellTotal(e.cellCount), copd = e.model === COPD_MODEL;
+  const name = `Experiment ${expNum(e)}${e.title ? ' – ' + e.title : ''}`;
+  const pres = newDeck(PptxGenJS, name);
+
+  let sec = addSec(pres, 'Overview');
+  sTitle(pres, sec, name, [e.model || 'No model', e.status, e.seedingDate ? 'Seeded ' + fmtDate(e.seedingDate) : '', 'Report ' + fmtDate(todayISO())].filter(Boolean).join('  ·  '));
+  let s = sContent(pres, sec, 'Experiment at a glance');
+  const day = e.seedingDate ? dayOf(e.seedingDate, todayISO()) : null;
+  [[e.status === 'Finished' ? '–' : (day ?? '–'), 'Day'], [chips.length, 'Chips seeded'], [allCh.length, 'Chambers'], [cnt('failed'), 'Failed', cnt('failed') ? PT.failed : PT.primary]]
+    .forEach(([v, l, col], k) => pStat(s, 0.5 + k * 2.3, 1.05, 2.1, v, l, col));
+  pKV(s, [
+    ['Model', e.model], ['Status', e.status], ['Seeding date', fmtDate(e.seedingDate)], ['Protocol', e.protocol],
+    ['Chambers', `${cnt('ok')} OK · ${cnt('low')} low-density · ${cnt('failed')} failed`],
+    ['Cell count', cc ? `${fmtSci(cc.total, true)} cells  (avg of ${e.cellCount.counts.map(fmtN).join(', ')} = ${fmtN(cc.avg)} × dilution ${fmtN(cc.dil)} × 10⁴)` : (e.cellsHarvested || '')],
+    ['Notes', clip(e.notes, 250)],
+  ], { y: 2.35, rowH: 0.34 });
+
+  // chip map (8 chips per slide)
+  if (chips.length) {
+    chunk(chips, 8).forEach((grp, k, arr) => {
+      const sl = sContent(pres, sec, 'Chip map' + (arr.length > 1 ? ` (${k + 1}/${arr.length})` : ''));
+      grp.forEach((c, j) => {
+        const x = 0.5 + (j % 4) * 2.3, y = 1.05 + Math.floor(j / 4) * 1.9, w = 2.1, h = 1.75;
+        sl.addShape('roundRect', { x, y, w, h, rectRadius: 0.12, fill: { color: 'F4F7F8' }, line: { color: PT.line, width: 1 } });
+        sl.addText([{ text: 'Chip ' + c.letter, options: { bold: true, color: PT.primary } }, { text: '  ' + clip(chipMixed(c) ? 'mixed conditions' : (condName(e, c) || 'no condition'), 22), options: { color: PT.muted } }],
+          { x: x + 0.1, y: y + 0.06, w: w - 0.2, h: 0.3, fontFace: PT.font, fontSize: 11, isTextBox: true, margin: 0, valign: 'middle' });
+        c.chambers.forEach((ch, i) => {
+          const cx = x + 0.12 + i * 0.64, cy = y + 0.42, cw = 0.58, chh = 1.22, [fill, line] = ST_FILL[ch.status];
+          sl.addShape('roundRect', { x: cx, y: cy, w: cw, h: chh, rectRadius: 0.1, fill: { color: fill }, line: { color: line, width: 1.75 } });
+          sl.addText([{ text: c.letter + (i + 1), options: { bold: true, fontSize: 12, color: PT.text, breakLine: true } },
+            { text: clip(chCondName(e, c, i) || '–', 18), options: { fontSize: 8, color: PT.muted } }],
+            { x: cx + 0.02, y: cy + 0.05, w: cw - 0.04, h: chh - 0.1, fontFace: PT.font, align: 'center', valign: 'middle', isTextBox: true, margin: 0, fit: 'shrink' });
+        });
+      });
+      pLegend(sl);
+    });
+  }
+
+  // conditions & drugs
+  sec = addSec(pres, 'Conditions');
+  const condRows = e.conditions.map(c => [{ text: c.name, bold: true }, ...(copd ? [c.cse ? 'Yes' : 'No', (c.drugIds || []).map(d => e.drugs.find(x => x.id === d)?.name || '').filter(Boolean).join(', ') || '–'] : []),
+    chips.flatMap(x => [0, 1, 2].filter(i => chCondId(x, i) === c.id).map(i => x.letter + (i + 1))).join(', ') || '–']);
+  pTablePages(pres, sec, 'Conditions', copd ? [{ t: 'Condition', w: 2.3 }, { t: 'CSE', w: 0.8 }, { t: 'Drugs', w: 2.4 }, { t: 'Chambers', w: 3.5 }] : [{ t: 'Condition', w: 3 }, { t: 'Chambers', w: 6 }],
+    condRows, { per: 10, empty: 'No conditions defined.' });
+  if (e.drugs.length) pTablePages(pres, sec, 'Drugs', [{ t: 'Drug', w: 2.5 }, { t: 'Dilution', w: 4.5 }, { t: 'Per mL of medium', w: 2, a: 'right' }],
+    e.drugs.map(d => { const f = drugFraction(d); return [{ text: d.name, bold: true }, d.mode === 'conc' ? `${d.stock} ${d.stockUnit} → ${d.final} ${d.finalUnit} (1:${f ? fmtN(1 / f) : '?'})` : `1:${d.ratio}`, f ? fmtUL(f * 1000) : '–']; }), { per: 10 });
+
+  // chambers
+  sec = addSec(pres, 'Chambers');
+  const chRows = chips.flatMap(c => c.chambers.map((ch, i) => [
+    { text: c.letter + (i + 1), bold: true }, clip(chCondName(e, c, i), 26),
+    { text: CH_STATUS[ch.status], bold: true, color: ST_FILL[ch.status][1] },
+    ch.status === 'failed' ? clip(`${ch.failReason || ''}${ch.failDay != null && ch.failDay !== '' ? ' · day ' + ch.failDay : ''}${ch.failNote ? ' · ' + ch.failNote : ''}`, 40) : '',
+    clip(ch.notes, 70), String(photos.filter(p => p.chipId === c.id && p.chamber === i + 1).length),
+  ]));
+  pTablePages(pres, sec, 'Chamber details', [{ t: 'Chamber', w: 0.9 }, { t: 'Condition', w: 1.9 }, { t: 'Status', w: 1.2 }, { t: 'Failure', w: 1.9 }, { t: 'Notes', w: 2.4 }, { t: 'Photos', w: 0.7, a: 'right' }],
+    chRows, { per: 12, rowH: 0.3, fontSize: 11, empty: 'No chips yet.' });
+
+  // medium changes
   if (e.mediumChanges.length) {
-    h += `<h2>Medium changes</h2>`;
+    sec = addSec(pres, 'Medium changes');
     for (const m of [...e.mediumChanges].sort((a, b) => a.date.localeCompare(b.date))) {
-      const tot = { total: 0, cse: 0, medium: 0 };
-      (m.rows || []).forEach(r => { tot.total += r.total || 0; tot.cse += r.cse || 0; tot.medium += r.medium || 0; });
+      const sl = sContent(pres, sec, `Medium change – ${m.day != null ? 'Day ' + m.day + ' · ' : ''}${fmtDate(m.date)}`);
+      const avg = a => a.reduce((x, y) => x + y, 0) / a.length;
+      pStat(sl, 0.5, 1.05, 1.9, m.absorbance != null ? fmtN(m.absorbance) : '–', 'Absorbance');
+      pStat(sl, 0.5, 2.25, 1.9, m.cseFraction ? fmtN(m.cseFraction * 100) + ' %' : '–', 'CSE fraction (0.07/abs)');
+      const info = [
+        m.cseReadings ? `CSE: ${m.cseReadings.map(fmtN).join(', ')}${m.cseReadings.length > 1 ? ' (avg ' + fmtN(avg(m.cseReadings)) + ')' : ''}` : '',
+        m.blankReadings ? `Blank: ${m.blankReadings.map(fmtN).join(', ')}${m.blankReadings.length > 1 ? ' (avg ' + fmtN(avg(m.blankReadings)) + ')' : ''}` : '',
+        `Volume per chip: ${fmtN(m.volPerChip)} mL`, m.notes ? clip(m.notes, 90) : '',
+      ].filter(Boolean);
+      sl.addText(info.map((t, k) => ({ text: t, options: { breakLine: k < info.length - 1 } })), { x: 0.5, y: 3.45, w: 1.9, h: 1.6, fontFace: PT.font, fontSize: 10, color: PT.text, valign: 'top', isTextBox: true, margin: 0, fit: 'shrink' });
+      const tot = { total: 0, cse: 0, medium: 0 }; (m.rows || []).forEach(r => { tot.total += r.total || 0; tot.cse += r.cse || 0; tot.medium += r.medium || 0; });
+      const unit = m.countUnit === 'chamber' ? 'Chambers' : 'Chips';
+      const rows = (m.rows || []).map(r => [{ text: r.name, bold: true }, String(r.n), fmtUL(r.total), r.cse ? fmtUL(r.cse) : '–', (r.drugs || []).map(d => `${d.name} ${fmtUL(d.vol)}`).join('\n') || '–', { text: fmtUL(r.medium), bold: true }]);
+      pTable(sl, [{ t: 'Condition', w: 1.5 }, { t: unit, w: 0.85, a: 'right' }, { t: 'Total', w: 0.85, a: 'right' }, { t: 'CSE', w: 0.8, a: 'right' }, { t: 'Drugs', w: 1.3 }, { t: 'Base medium', w: 1.0, a: 'right' }],
+        rows.slice(0, 9), { x: 2.65, y: 1.05, fontSize: 10.5, rowH: 0.28, foot: ['Total', '', fmtUL(tot.total), fmtUL(tot.cse), '', fmtUL(tot.medium)] });
       const k = (m.baseMediumMl || 0) * 1000 / BASE_MEDIUM_TOTAL;
-      h += `<div class="block"><h3 style="margin-top:0">${m.day != null ? 'Day ' + m.day + ' · ' : ''}${fmtDate(m.date)}</h3>` + rKV([
-        ...(m.cseReadings ? [['CSE readings', m.cseReadings.map(fmtN).join(', ') + (m.cseReadings.length > 1 ? ` (avg ${fmtN(m.cseReadings.reduce((a, b) => a + b, 0) / m.cseReadings.length)})` : '')],
-          ['Blank readings', m.blankReadings.map(fmtN).join(', ') + (m.blankReadings.length > 1 ? ` (avg ${fmtN(m.blankReadings.reduce((a, b) => a + b, 0) / m.blankReadings.length)})` : '')]] : []),
-        ['CSE absorbance' + (m.cseReadings ? ' (CSE avg − blank avg)' : ''), m.absorbance != null ? fmtN(m.absorbance) : '–'], ['CSE fraction (0.07 / absorbance)', m.cseFraction ? `${fmtN(m.cseFraction)} (${fmtN(m.cseFraction * 100)} %)` : '–'],
-        ['Volume per chip', fmtN(m.volPerChip) + ' mL'], ['Notes', nl(m.notes)],
-      ]) + rTable(['Condition', { t: m.countUnit === 'chamber' ? 'Chambers' : 'Chips', n: 1 }, { t: 'Total', n: 1 }, { t: 'CSE', n: 1 }, 'Drugs', { t: 'Base medium', n: 1 }],
-        (m.rows || []).map(r => [esc(r.name), r.n, fmtUL(r.total), r.cse ? fmtUL(r.cse) : '–', (r.drugs || []).map(d => `${esc(d.name)} ${fmtUL(d.vol)}`).join('<br>') || '–', `<b>${fmtUL(r.medium)}</b>`]),
-        ['Total', '', fmtUL(tot.total), fmtUL(tot.cse), '', fmtUL(tot.medium)])
-        + `<p style="margin:4px 0">Base medium prepared: <b>${m.baseMediumMl} mL</b></p>`
-        + rTable(['Component', { t: 'per 10 mL', n: 1 }, { t: `for ${m.baseMediumMl} mL`, n: 1 }], BASE_MEDIUM.map(([n, v]) => [n, fmtUL(v), `<b>${fmtUL(v * k)}</b>`])) + `</div>`;
+      const extraLines = (m.rows || []).slice(0, 9).reduce((t, r) => t + Math.max(0, (r.drugs || []).length - 1), 0);
+      const yb = 1.05 + 0.28 * (Math.min(rows.length, 9) + 2) + 0.2 * extraLines + 0.3;
+      if (yb < 4.3) pTable(sl, [{ t: `Base medium · ${m.baseMediumMl} mL`, w: 2.3 }, { t: 'per 10 mL', w: 2.0, a: 'right' }, { t: `for ${m.baseMediumMl} mL`, w: 2.0, a: 'right' }],
+        BASE_MEDIUM.map(([n, v]) => [n, fmtUL(v), { text: fmtUL(v * k), bold: true }]), { x: 2.65, y: yb, fontSize: 9.5, rowH: 0.22 });
+      else {
+        const sl2 = sContent(pres, sec, `Base medium – ${fmtDate(m.date)}`);
+        pTable(sl2, [{ t: 'Component', w: 3 }, { t: 'per 10 mL', w: 2, a: 'right' }, { t: `for ${m.baseMediumMl} mL`, w: 2, a: 'right' }], BASE_MEDIUM.map(([n, v]) => [n, fmtUL(v), { text: fmtUL(v * k), bold: true }]));
+      }
     }
   }
+
+  // stainings
   if (e.stainings.length) {
-    h += `<h2>Stainings</h2>`;
-    for (const s of [...e.stainings].sort((a, b) => a.date.localeCompare(b.date))) {
-      const V = s.totalVolume ?? s.nChambers * s.volPerChamber * (1 + (s.extraPct || 0) / 100);
-      const abT = abs => { const list = abs.filter(a => a.itemId); const gs = V * 0.005, sum = list.reduce((t, a) => t + (a.vol || V / a.dilution || 0), 0);
-        return rTable(['Component', { t: 'Volume', n: 1 }], [['Goat Serum (0.5 %)', fmtUL(gs)], ...list.map((a, i) => [`#${i + 1} ${esc(a.name)} (1:${a.dilution})`, fmtUL(a.vol ?? V / a.dilution)]), ['PBS (remaining)', fmtUL(V - gs - sum)]], ['Total', fmtUL(V)]); };
-      const img = WAVELENGTHS.map(w => [w, esc(s.imaging?.[w]?.marker), s.imaging?.[w]?.laser ?? '', s.imaging?.[w]?.exposure ?? '']);
-      h += `<div class="block"><h3 style="margin-top:0">${esc(s.title || 'Staining')} – ${s.day != null ? 'Day ' + s.day + ' · ' : ''}${fmtDate(s.date)}</h3>` + rKV([
-        ['Chambers stained', s.nChambers], ['Volume per chamber', fmtN(s.volPerChamber) + ' µL'], ['Extra volume', s.extraPct ? fmtN(s.extraPct) + ' %' : ''],
-        ['Volume per solution', fmtUL(V)], ['Antibodies deducted from storage', s.deducted ? 'Yes' : 'No'], ['Notes', nl(s.notes)],
-      ]) + `<h3>Permeabilization & blocking</h3>` + rTable(['Component', { t: 'Volume', n: 1 }], [['Goat Serum (5 %)', fmtUL(V * 0.05)], ['Tween-20 (0.1 %)', fmtUL(V * 0.001)], ['PBS (remaining)', fmtUL(V * 0.949)]], ['Total', fmtUL(V)])
-        + `<h3>Primary antibodies</h3>` + abT(s.primary || []) + `<h3>Secondary antibodies</h3>` + abT(s.secondary || [])
-        + `<h3>Imaging</h3>` + rTable([{ t: 'λ (nm)' }, 'Marker', { t: 'Laser (%)', n: 1 }, { t: 'Exposure (ms)', n: 1 }], img) + `</div>`;
+    sec = addSec(pres, 'Stainings');
+    for (const st of [...e.stainings].sort((a, b) => a.date.localeCompare(b.date))) {
+      const V = st.totalVolume ?? st.nChambers * st.volPerChamber * (1 + (st.extraPct || 0) / 100);
+      const sl = sContent(pres, sec, `${clip(st.title || 'Staining', 40)} – ${st.day != null ? 'Day ' + st.day + ' · ' : ''}${fmtDate(st.date)}`);
+      sl.addText(`${st.nChambers} chambers × ${fmtN(st.volPerChamber)} µL${st.extraPct ? ' + ' + fmtN(st.extraPct) + ' %' : ''} = ${fmtUL(V)} per solution${st.deducted ? '  ·  antibodies deducted from storage' : ''}`,
+        { x: 0.5, y: 0.9, w: 9, h: 0.3, fontFace: PT.font, fontSize: 12, color: PT.muted, isTextBox: true, margin: 0 });
+      const abList = abs => (abs || []).filter(a => a.itemId);
+      const abRowsP = abs => { const l = abList(abs), gs = V * 0.005, sum = l.reduce((t, a) => t + (a.vol ?? V / a.dilution), 0);
+        return [['Goat Serum 0.5 %', fmtUL(gs)], ...l.map((a, i) => [`#${i + 1} ${clip(a.name, 22)} 1:${a.dilution}`, fmtUL(a.vol ?? V / a.dilution)]), ['PBS (rest)', fmtUL(V - gs - sum)]]; };
+      const cols = [
+        ['Permeabilization & blocking', [['Goat Serum 5 %', fmtUL(V * 0.05)], ['Tween-20 0.1 %', fmtUL(V * 0.001)], ['PBS (rest)', fmtUL(V * 0.949)]]],
+        ['Primary antibodies', abRowsP(st.primary)], ['Secondary antibodies', abRowsP(st.secondary)],
+      ];
+      cols.forEach(([t, rows], k) => pTable(sl, [{ t, w: 2.05 }, { t: 'µL', w: 0.85, a: 'right' }], rows, { x: 0.5 + k * 3.05, y: 1.3, fontSize: 10, rowH: 0.27, foot: ['Total', fmtUL(V)] }));
+      const img = WAVELENGTHS.map(w => [{ text: w + ' nm', bold: true }, clip(st.imaging?.[w]?.marker, 30) || '–', st.imaging?.[w]?.laser !== '' && st.imaging?.[w]?.laser != null ? st.imaging[w].laser + ' %' : '–', st.imaging?.[w]?.exposure !== '' && st.imaging?.[w]?.exposure != null ? st.imaging[w].exposure + ' ms' : '–']);
+      pTable(sl, [{ t: 'Imaging', w: 1.4 }, { t: 'Marker', w: 3.8 }, { t: 'Laser', w: 1.9, a: 'right' }, { t: 'Exposure', w: 1.9, a: 'right' }], img, { x: 0.5, y: 3.35, fontSize: 10.5, rowH: 0.27 });
+      if (st.notes) sl.addText('Notes: ' + clip(st.notes, 160), { x: 0.5, y: 4.85, w: 9, h: 0.35, fontFace: PT.font, fontSize: 10, color: PT.muted, isTextBox: true, margin: 0, fit: 'shrink' });
     }
   }
-  h += `<h2>Consumables used</h2>` + (movs.length ? rTable(['Date', 'Item', { t: 'Quantity', n: 1 }, 'Note'],
-    movs.sort((a, b) => a.date.localeCompare(b.date)).map(m => [fmtDateTime(m.date), esc(itemMap[m.itemId]?.name || 'deleted item'), `${fmtQty(-m.delta)} ${esc(itemMap[m.itemId]?.unit || '')}`, esc(m.note)])) : '<p class="muted">None recorded.</p>');
+
+  // consumables
+  sec = addSec(pres, 'Consumables');
+  pTablePages(pres, sec, 'Consumables used', [{ t: 'Date', w: 1.9 }, { t: 'Item', w: 3.2 }, { t: 'Quantity', w: 1.4, a: 'right' }, { t: 'Note', w: 2.5 }],
+    movs.sort((a, b) => a.date.localeCompare(b.date)).map(m => [fmtDateTime(m.date), clip(itemMap[m.itemId]?.name || 'deleted item', 40), `${fmtQty(-m.delta)} ${itemMap[m.itemId]?.unit || ''}`, clip(m.note, 40)]),
+    { per: 12, empty: 'No consumables linked to this experiment.' });
+
+  // photos: one slide per day and per 4 chips (rows = chambers 1-3)
   if (withPhotos && photos.length) {
-    h += `<h2>Photos</h2>`;
+    sec = addSec(pres, 'Photos');
     const days = [...new Set(photos.map(p => p.day))].sort((a, b) => a - b);
     for (const d of days) {
-      h += `<div class="day"><h3>Day ${d}${e.seedingDate ? ' · ' + fmtDate(dateForDay(e.seedingDate, d)) : ''}</h3>`;
-      for (const c of chips) {
-        const cells = [];
-        for (let n = 1; n <= 3; n++) {
-          const p = photos.find(x => x.day === d && x.chipId === c.id && x.chamber === n), st = c.chambers[n - 1].status;
-          cells.push(p ? `<figure class="${st}"><img src="${await blobToDataURL(p.blob)}" alt=""><figcaption><b>${c.letter}${n}</b> · ${esc(chCondName(e, c, n - 1))}</figcaption></figure>` : `<figure class="none">${c.letter}${n} – no photo</figure>`);
+      const withP = chips.filter(c => photos.some(p => p.day === d && p.chipId === c.id));
+      for (const [k, grp] of chunk(withP, 4).entries()) {
+        const pages = Math.ceil(withP.length / 4);
+        const sl = sContent(pres, sec, `Day ${d}${e.seedingDate ? ' · ' + fmtDate(dateForDay(e.seedingDate, d)) : ''}${pages > 1 ? ` (${k + 1}/${pages})` : ''}`);
+        const size = 1.18;
+        for (const [j, c] of grp.entries()) {
+          const x = 0.5 + j * 2.3;
+          for (let n = 1; n <= 3; n++) {
+            const p = photos.find(q => q.day === d && q.chipId === c.id && q.chamber === n), stt = c.chambers[n - 1].status;
+            const y = 0.95 + (n - 1) * 1.45;
+            pPhoto(sl, p ? await photoThumb(photoBlob(p)) : null, x, y, size, size, ST_FILL[stt][1]);
+            sl.addText([{ text: c.letter + n, options: { bold: true, breakLine: true, fontSize: 12 } }, { text: clip(chCondName(e, c, n - 1), 24), options: { fontSize: 9, color: PT.muted, breakLine: true } },
+              { text: CH_STATUS[stt], options: { fontSize: 9, color: ST_FILL[stt][1], bold: true } }],
+              { x: x + size + 0.07, y, w: 2.3 - size - 0.15, h: size, fontFace: PT.font, color: PT.text, valign: 'top', isTextBox: true, margin: 0, fit: 'shrink' });
+          }
         }
-        if (photos.some(x => x.day === d && x.chipId === c.id)) h += `<div class="grid">${cells.join('')}</div>`;
       }
-      h += `</div>`;
     }
   }
-  const title = `Experiment ${expNum(e)} ${e.title || ''}`.trim();
-  return { title, html: reportDoc(title, h), file: `LabTrack_Report_Exp${pad2(e.number)}${e.title ? '_' + slug(e.title) : ''}_${todayISO()}.html` };
+  return { pres, file: `LabTrack_Report_Exp${pad2(e.number)}${e.title ? '_' + slug(e.title) : ''}_${todayISO()}.pptx` };
 }
 
-async function reportExpansion(id, withPhotos) {
+/* ---------------- cell expansion deck ---------------- */
+async function deckExpansion(PptxGenJS, id, withPhotos) {
   const x = await get('expansions', id), photos = await all('photos', 'expId', id);
-  const st = expansionStats(x);
-  const area = st.area;
-  let h = `<h1>Cell expansion #${pad2(x.number)} – ${esc(x.cellType)}</h1><p class="sub">${x.lot ? 'Lot ' + esc(x.lot) + ' · ' : ''}${x.status}</p>`;
-  h += `<h2>General information</h2>` + rKV([
-    ['Cell type', esc(x.cellType)], ['Lot', esc(x.lot)], ['Cells in vial (theoretical)', fmtCells(x.vialCells)],
-    ['Seeding efficiency', fmtN(x.seedingEff) + ' %'], ['Cell viability', fmtN(x.viability) + ' %'],
-    ['Flask type', esc(x.flaskType) + (area ? ` (${area} cm²)` : '')], ['Started', fmtDT(x.passages[0].start)], ['Status', x.status],
-    ['Passages', x.passages.map(pLabel).join(', ')], ['Notes', nl(x.notes)],
-  ]);
-  if (st.splits) h += `<h2>Overall results</h2>` + rTable(['Parameter', { t: 'Raw', n: 1 }, { t: 'Corrected', n: 1 }], [
-    ['Passages completed', st.splits, ''], ['Time (completed passages)', fmtDur(st.doneH), ''],
-    ['Cumulative population doublings', fmtN(st.cpd), fmtN(st.cpdC)], ['<b>Mean doubling time</b>', `<b>${fmtH(st.dt)}</b>`, `<b>${fmtH(st.dtC)}</b>`],
-    ['Theoretical yield (all cells kept)', fmtCells(st.yieldT), ''], ['Total harvested', fmtCells(st.tot.harvested), ''],
-    ['Total frozen', fmtCells(st.tot.frozen), ''], ['Total used', fmtCells(st.tot.used), ''], ['Total discarded', fmtCells(st.tot.discarded), ''],
-  ]) + `<p class="muted">Corrected: N₀ × seeding efficiency × viability (vial viability for the first passage, viability at harvest – if entered – for later passages).</p>`;
-  h += `<h2>Passage summary</h2><div class="small">` + rTable(['Passage', 'Seeded', 'Harvested', { t: 'Flasks', n: 1 }, { t: 'N₀', n: 1 }, { t: 'N', n: 1 }, { t: 'Time', n: 1 }, { t: 'PD raw', n: 1 }, { t: 'PD corr.', n: 1 }, { t: 'DT raw', n: 1 }, { t: 'DT corr.', n: 1 }],
-    st.rows.map(r => [pLabel(r.p), fmtDT(r.p.start), r.p.split ? fmtDT(r.p.split.date) : 'running', r.nFlasks, fmtCells(r.N0), r.p.split ? fmtCells(r.p.split.harvested) : '–',
-      r.p.split ? fmtN(r.h) + ' h' : '–', r.p.split ? fmtN(r.pd) : '–', r.p.split ? fmtN(r.pdC) : '–', r.p.split ? fmtH(r.dt) : '–', r.p.split ? fmtH(r.dtC) : '–'])) + '</div>';
-  h += `<h2>Passage details</h2>`;
-  for (const r of st.rows) {
-    const s = r.p.split;
-    h += `<div class="block"><h3 style="margin-top:0">${pLabel(r.p)} · ${fmtDT(r.p.start)} → ${s ? fmtDT(s.date) : 'running'}</h3>`
-      + rTable(['Flask', { t: 'Cells seeded', n: 1 }, ...(area ? [{ t: 'Density', n: 1 }] : []), 'Notes', { t: 'Photos', n: 1 }],
-        r.p.flasks.map(f => [f.name, fmtCells(f.seeded), ...(area ? [fmtCells(f.seeded / area) + '/cm²'] : []), nl(f.notes), photos.filter(p => p.chipId === f.id).length]))
-      + rTable(['Parameter', { t: 'Raw', n: 1 }, { t: 'Corrected', n: 1 }], [
-        ['Cells seeded (N₀)', fmtCells(r.N0), fmtCells(r.N0c)],
-        ...(r.seedDens != null ? [['Seeding density', fmtCells(r.seedDens) + '/cm²', fmtCells(r.N0c / (r.nFlasks * area)) + '/cm²']] : []),
-        ['Time in culture', fmtDur(r.h), ''],
-        ...(s ? [
-          ['Cells harvested (N)', fmtCells(s.harvested), ''],
-          ...(r.harvDens != null ? [['Harvest density', fmtCells(r.harvDens) + '/cm²', '']] : []),
-          ['Fold expansion', fmtN(r.fold) + '×', fmtN(r.foldC) + '×'], ['Population doublings', fmtN(r.pd), fmtN(r.pdC)],
-          ['<b>Doubling time</b>', `<b>${fmtH(r.dt)}</b>`, `<b>${fmtH(r.dtC)}</b>`],
-          ['Growth rate μ', r.mu != null ? fmtN(r.mu) + ' /day' : '–', r.muC != null ? fmtN(r.muC) + ' /day' : '–'],
-          ['Cumulative PD', fmtN(r.cpd), fmtN(r.cpdC)],
-          ['Frozen', fmtCells(s.frozen), ''], ['Used', fmtCells(s.used), ''], ['Thrown away', fmtCells(s.discarded), ''],
-          ...(s.viability ? [['Viability at harvest', fmtN(s.viability) + ' %', '']] : []),
-          ...(s.notes ? [['Split notes', nl(s.notes), '']] : []),
-        ] : []),
-      ]) + `</div>`;
+  const st = expansionStats(x), area = st.area;
+  const name = `Cell expansion #${pad2(x.number)} – ${x.cellType || ''}`;
+  const pres = newDeck(PptxGenJS, name);
+  let sec = addSec(pres, 'Overview');
+  sTitle(pres, sec, name, [x.lot ? 'Lot ' + x.lot : '', x.status, 'Started ' + fmtDT(x.passages[0].start), 'Report ' + fmtDate(todayISO())].filter(Boolean).join('  ·  '));
+  let s = sContent(pres, sec, 'Expansion at a glance');
+  [[pLabel(curPassage(x)), x.status === 'Finished' ? 'Last passage' : 'Current passage'], [st.splits ? fmtN(st.cpd) : '–', 'Cumulative PD (raw)'],
+   [st.dt ? Math.round(st.dt) + ' h' : '–', 'Mean DT raw'], [st.dtC ? Math.round(st.dtC) + ' h' : '–', 'Mean DT corrected']]
+    .forEach(([v, l], k) => pStat(s, 0.5 + k * 2.3, 1.05, 2.1, v, l));
+  pKV(s, [
+    ['Cell type · lot', `${x.cellType}${x.lot ? ' · ' + x.lot : ''}`], ['Cells in vial', fmtCells(x.vialCells)],
+    ['Seeding efficiency · viability', `${fmtN(x.seedingEff)} % · ${fmtN(x.viability)} %`], ['Flask type', `${x.flaskType}${area ? ` (${area} cm²)` : ''}`],
+    ['Totals', `harvested ${fmtCells(st.tot.harvested)} · frozen ${fmtCells(st.tot.frozen)} · used ${fmtCells(st.tot.used)} · discarded ${fmtCells(st.tot.discarded)}`],
+    ['Theoretical yield', st.splits ? fmtCells(st.yieldT) + ' (if all cells had been kept)' : ''], ['Notes', clip(x.notes, 200)],
+  ], { y: 2.35, rowH: 0.34 });
+
+  const done = st.rows.filter(r => r.p.split);
+  if (done.length) {
+    sec = addSec(pres, 'Growth');
+    s = sContent(pres, sec, 'Growth across passages');
+    const labels = done.map(r => pLabel(r.p));
+    const axis = { catAxisLabelColor: PT.muted, valAxisLabelColor: PT.muted, catAxisLabelFontFace: PT.font, valAxisLabelFontFace: PT.font, catAxisLabelFontSize: 11, valAxisLabelFontSize: 10,
+      valGridLine: { color: 'E5EAEE', size: 0.75 }, catGridLine: { style: 'none' }, showLegend: true, legendPos: 'b', legendFontFace: PT.font, legendFontSize: 11,
+      titleFontFace: PT.font, titleFontSize: 13, titleColor: PT.text, dataLabelFontFace: PT.font, dataLabelFontSize: 9, dataLabelColor: PT.text };
+    s.addChart(pres.ChartType.line, [{ name: 'Raw', labels, values: done.map(r => +r.cpd.toFixed(2)) }, { name: 'Corrected', labels, values: done.map(r => +r.cpdC.toFixed(2)) }],
+      { x: 0.5, y: 1.0, w: 4.4, h: 4.1, showTitle: true, title: 'Cumulative population doublings', chartColors: [PT.primary, PT.low], lineSize: 2.5, lineDataSymbolSize: 8,
+        showValue: true, dataLabelPosition: 't', dataLabelFormatCode: '0.0', ...axis });
+    s.addChart(pres.ChartType.bar, [{ name: 'Raw', labels, values: done.map(r => r.dt ? +r.dt.toFixed(1) : 0) }, { name: 'Corrected', labels, values: done.map(r => r.dtC ? +r.dtC.toFixed(1) : 0) }],
+      { x: 5.1, y: 1.0, w: 4.4, h: 4.1, barDir: 'col', barGrouping: 'clustered', showTitle: true, title: 'Doubling time per passage (h)', chartColors: [PT.primary, PT.low],
+        showValue: true, dataLabelPosition: 'outEnd', dataLabelFormatCode: '0', ...axis });
   }
+
+  sec = addSec(pres, 'Passages');
+  pTablePages(pres, sec, 'Passage summary',
+    [{ t: 'Passage', w: 0.8 }, { t: 'Seeded', w: 1.45 }, { t: 'Harvested', w: 1.45 }, { t: 'Flasks', w: 0.6, a: 'right' }, { t: 'N₀', w: 0.95, a: 'right' }, { t: 'N', w: 0.95, a: 'right' },
+     { t: 'Time', w: 0.65, a: 'right' }, { t: 'PD raw/corr', w: 1.05, a: 'right' }, { t: 'DT raw/corr', w: 1.1, a: 'right' }],
+    st.rows.map(r => [{ text: pLabel(r.p), bold: true }, fmtDT(r.p.start), r.p.split ? fmtDT(r.p.split.date) : 'running', String(r.nFlasks), fmtCells(r.N0),
+      r.p.split ? fmtCells(r.p.split.harvested) : '–', r.p.split ? Math.round(r.h) + ' h' : '–', r.p.split ? `${fmtN(r.pd)} / ${fmtN(r.pdC)}` : '–',
+      r.p.split ? `${r.dt ? Math.round(r.dt) : '–'} / ${r.dtC ? Math.round(r.dtC) : '–'} h` : '–']), { per: 10, fontSize: 10.5 });
+  for (const r of st.rows) {
+    const sp = r.p.split;
+    const sl = sContent(pres, sec, `${pLabel(r.p)} · ${fmtDT(r.p.start)} → ${sp ? fmtDT(sp.date) : 'running'}`);
+    pTable(sl, [{ t: 'Parameter', w: 2.4 }, { t: 'Raw', w: 1.5, a: 'right' }, { t: 'Corrected', w: 1.5, a: 'right' }], [
+      ['Cells seeded (N₀)', fmtCells(r.N0), fmtCells(r.N0c)],
+      ...(r.seedDens != null ? [['Seeding density /cm²', fmtCells(r.seedDens), fmtCells(r.N0c / (r.nFlasks * area))]] : []),
+      ['Time in culture', fmtDur(r.h), ''],
+      ...(sp ? [['Cells harvested (N)', fmtCells(sp.harvested), ''], ...(r.harvDens != null ? [['Harvest density /cm²', fmtCells(r.harvDens), '']] : []),
+        ['Fold expansion', fmtN(r.fold) + '×', fmtN(r.foldC) + '×'], ['Population doublings', fmtN(r.pd), fmtN(r.pdC)],
+        [{ text: 'Doubling time', bold: true }, { text: fmtH(r.dt), bold: true }, { text: fmtH(r.dtC), bold: true }],
+        ['Growth rate μ (/day)', r.mu != null ? fmtN(r.mu) : '–', r.muC != null ? fmtN(r.muC) : '–'], ['Cumulative PD', fmtN(r.cpd), fmtN(r.cpdC)]] : []),
+    ], { x: 0.5, y: 1.05, fontSize: 11, rowH: 0.3 });
+    pTable(sl, [{ t: 'Flask', w: 0.9 }, { t: 'Seeded', w: 1.3, a: 'right' }, { t: 'Photos', w: 0.9, a: 'right' }],
+      r.p.flasks.slice(0, 7).map(f => [{ text: f.name, bold: true }, fmtCells(f.seeded), String(photos.filter(q => q.chipId === f.id).length)]), { x: 6.4, y: 1.05, fontSize: 11, rowH: 0.3 });
+    if (sp) pKV(sl, [['Frozen', fmtCells(sp.frozen)], ['Used', fmtCells(sp.used)], ['Thrown away', fmtCells(sp.discarded)], ['Viability at harvest', sp.viability ? fmtN(sp.viability) + ' %' : ''], ['Notes', clip(sp.notes, 60)]],
+      { x: 6.4, y: 1.05 + 0.3 * (Math.min(r.p.flasks.length, 7) + 1) + 0.25, w: 3.1, kw: 1.4, fontSize: 10.5, rowH: 0.27 });
+  }
+  if (st.splits) {
+    const sl = sContent(pres, sec, 'How the values are calculated');
+    sl.addText([
+      { text: 'Population doublings (PD) = log₂(N / N₀); doubling time = hours in culture / PD; growth rate μ = ln(N / N₀) / days.', options: { breakLine: true, bullet: true } },
+      { text: 'Raw: N₀ = cells seeded in the flasks.', options: { breakLine: true, bullet: true } },
+      { text: 'Corrected: N₀ × seeding efficiency × viability – vial viability for the first passage, viability at harvest of the previous split (if entered) for later passages.', options: { breakLine: true, bullet: true } },
+      { text: 'Mean doubling time = total hours of completed passages / cumulative PD.', options: { bullet: true } },
+    ], { x: 0.5, y: 1.1, w: 9, h: 3.5, fontFace: PT.font, fontSize: 15, color: PT.text, valign: 'top', isTextBox: true, paraSpaceAfter: 10 });
+  }
+
   if (withPhotos && photos.length) {
-    h += `<h2>Photos</h2>`;
+    sec = addSec(pres, 'Photos');
     for (const p of x.passages) for (const f of p.flasks) {
       const ph = photos.filter(q => q.chipId === f.id).sort((a, b) => a.day - b.day);
-      if (!ph.length) continue;
-      const figs = [];
-      for (const q of ph) figs.push(`<figure><img src="${await blobToDataURL(q.blob)}" alt=""><figcaption><b>Day ${q.day}</b> · ${fmtDate(q.date)}</figcaption></figure>`);
-      h += `<div class="day"><h3>${pLabel(p)} · ${f.name}</h3><div class="grid4">${figs.join('')}</div></div>`;
+      for (const [k, grp] of chunk(ph, 8).entries()) {
+        if (!grp.length) continue;
+        const pages = Math.ceil(ph.length / 8);
+        const sl = sContent(pres, sec, `${pLabel(p)} · ${f.name}${pages > 1 ? ` (${k + 1}/${pages})` : ''}`);
+        for (const [j, q] of grp.entries()) {
+          const xx = 0.5 + (j % 4) * 2.3, yy = 1.0 + Math.floor(j / 4) * 2.1, sz = 1.75;
+          pPhoto(sl, await photoThumb(photoBlob(q)), xx + 0.17, yy, sz, sz, PT.primary, `Day ${q.day} · ${fmtDate(q.date)}`);
+        }
+      }
     }
   }
-  const title = `Cell expansion #${pad2(x.number)} ${x.cellType || ''}`.trim();
-  return { title, html: reportDoc(title, h), file: `LabTrack_Report_Expansion${pad2(x.number)}_${slug(x.cellType)}_${todayISO()}.html` };
+  return { pres, file: `LabTrack_Report_Expansion${pad2(x.number)}_${slug(x.cellType)}_${todayISO()}.pptx` };
 }
 
-async function reportStorage(withHist) {
+/* ---------------- storage deck ---------------- */
+async function deckStorage(PptxGenJS, withHist) {
   const [items, movs, exps] = await Promise.all([all('items'), all('movements'), all('experiments')]);
   const expMap = Object.fromEntries(exps.map(e => [e.id, e])), itemMap = Object.fromEntries(items.map(i => [i.id, i]));
   const low = items.filter(isLow), expiring = items.filter(expiryState);
-  let h = `<h1>Storage inventory</h1><p class="sub">${items.length} items · ${fmtDate(todayISO())}</p>`;
-  h += `<h2>Alerts</h2>` + ((low.length || expiring.length) ? rTable(['Item', 'Alert', { t: 'Quantity', n: 1 }, 'Location'],
-    [...low.map(i => [esc(i.name), `Low stock (min ${fmtQty(i.minQty)})`, `${fmtQty(i.quantity)} ${esc(i.unit)}`, esc(i.location)]),
-     ...expiring.map(i => [esc(i.name), `${expiryState(i).txt} (${fmtDate(i.expiry)})`, `${fmtQty(i.quantity)} ${esc(i.unit)}`, esc(i.location)])]) : '<p class="muted">No low-stock or expiring items.</p>');
+  const pres = newDeck(PptxGenJS, 'Storage inventory');
+  let sec = addSec(pres, 'Overview');
+  sTitle(pres, sec, 'Storage inventory', `${items.length} items  ·  ${fmtDate(todayISO())}`);
+  const s = sContent(pres, sec, 'Alerts');
+  const cats = new Set(items.map(i => i.category || 'Uncategorized'));
+  [[items.length, 'Items'], [cats.size, 'Categories'], [low.length, 'Low stock', low.length ? PT.low : PT.primary], [expiring.length, 'Expiring / expired', expiring.length ? PT.failed : PT.primary]]
+    .forEach(([v, l, c], k) => pStat(s, 0.5 + k * 2.3, 1.05, 2.1, v, l, c));
+  const alerts = [...low.map(i => [{ text: i.name, bold: true }, { text: `Low stock (min ${fmtQty(i.minQty)})`, color: '7A5A00' }, `${fmtQty(i.quantity)} ${i.unit}`, i.location || '']),
+    ...expiring.map(i => [{ text: i.name, bold: true }, { text: `${expiryState(i).txt} (${fmtDate(i.expiry)})`, color: PT.failed }, `${fmtQty(i.quantity)} ${i.unit}`, i.location || ''])];
+  if (alerts.length) pTable(s, [{ t: 'Item', w: 3 }, { t: 'Alert', w: 2.8 }, { t: 'Quantity', w: 1.4, a: 'right' }, { t: 'Location', w: 1.8 }], alerts.slice(0, 7), { y: 2.35, fontSize: 11, rowH: 0.3 });
+  else s.addText('No low-stock or expiring items.', { x: 0.5, y: 2.4, w: 9, h: 0.4, fontFace: PT.font, fontSize: 14, color: PT.muted, isTextBox: true, margin: 0 });
+  if (alerts.length > 7) pTablePages(pres, sec, 'Alerts (continued)', [{ t: 'Item', w: 3 }, { t: 'Alert', w: 2.8 }, { t: 'Quantity', w: 1.4, a: 'right' }, { t: 'Location', w: 1.8 }], alerts.slice(7), { fontSize: 11, per: 12 });
+
+  sec = addSec(pres, 'Inventory');
   const groups = Object.entries(groupBy(items.map(i => ({ ...i, _c: i.category || 'Uncategorized' })), '_c')).sort((a, b) => a[0].localeCompare(b[0]));
-  h += `<h2>Inventory</h2>`;
   for (const [cat, its] of groups) {
-    h += `<h3>${esc(cat)}</h3>` + rTable(['Item', { t: 'Quantity', n: 1 }, { t: 'Min', n: 1 }, 'Location', 'Lot', 'Expiry', 'Supplier / cat. #', 'Notes'],
-      its.sort((a, b) => a.name.localeCompare(b.name)).map(i => [`<b>${esc(i.name)}</b>${isLow(i) ? ' <span class="st low">LOW</span>' : ''}`,
-        `${fmtQty(i.quantity)} ${esc(i.unit)}`, i.minQty === '' || i.minQty == null ? '' : fmtQty(i.minQty), esc(i.location), esc(i.lot),
-        i.expiry ? fmtDate(i.expiry) + (expiryState(i) ? ` <span class="st ${expiryState(i).cls === 'expired' ? 'failed' : 'low'}">${expiryState(i).txt}</span>` : '') : '',
-        [i.supplier, i.catalog].filter(Boolean).map(esc).join(' · '), nl(i.notes)]));
+    pTablePages(pres, sec, cat, [{ t: 'Item', w: 2.3 }, { t: 'Quantity', w: 1.1, a: 'right' }, { t: 'Min', w: 0.6, a: 'right' }, { t: 'Location', w: 1.4 }, { t: 'Lot', w: 1.0 }, { t: 'Expiry', w: 1.2 }, { t: 'Supplier / cat. #', w: 1.4 }],
+      its.sort((a, b) => a.name.localeCompare(b.name)).map(i => [{ text: clip(i.name, 34), bold: true, fill: isLow(i) ? PT.lowSoft : undefined }, `${fmtQty(i.quantity)} ${i.unit}`, i.minQty === '' || i.minQty == null ? '' : fmtQty(i.minQty),
+        clip(i.location, 18), clip(i.lot, 14), i.expiry ? { text: fmtDate(i.expiry), color: expiryState(i) ? PT.failed : PT.text, bold: !!expiryState(i) } : '', clip([i.supplier, i.catalog].filter(Boolean).join(' · '), 22)]),
+      { per: 12, fontSize: 10.5, rowH: 0.3 });
   }
   if (withHist) {
-    h += `<h2>Movement history</h2>` + (movs.length ? rTable(['Date', 'Item', 'Type', { t: 'Change', n: 1 }, { t: 'Balance', n: 1 }, 'Experiment', 'Note'],
-      movs.sort((a, b) => b.date.localeCompare(a.date)).map(m => {
-        const it = itemMap[m.itemId];
-        return [fmtDateTime(m.date), esc(it?.name || 'deleted item'), m.type === 'set' ? 'Stocktake' : m.type === 'initial' ? 'Initial' : m.delta >= 0 ? 'Added' : 'Removed',
-          `${m.delta >= 0 ? '+' : '−'}${fmtQty(Math.abs(m.delta))}`, `${fmtQty(m.balance)} ${esc(it?.unit || '')}`,
-          m.expId ? (expMap[m.expId] ? expNum(expMap[m.expId]) + ' ' + esc(expMap[m.expId].title || '') : 'deleted') : '', esc(m.note)];
-      })) : '<p class="muted">No movements.</p>');
+    sec = addSec(pres, 'History');
+    pTablePages(pres, sec, 'Movement history', [{ t: 'Date', w: 1.6 }, { t: 'Item', w: 2.4 }, { t: 'Type', w: 1.0 }, { t: 'Change', w: 0.9, a: 'right' }, { t: 'Balance', w: 1.1, a: 'right' }, { t: 'Experiment / note', w: 2.0 }],
+      movs.sort((a, b) => b.date.localeCompare(a.date)).map(m => { const it = itemMap[m.itemId]; return [fmtDateTime(m.date), clip(it?.name || 'deleted item', 30),
+        m.type === 'set' ? 'Stocktake' : m.type === 'initial' ? 'Initial' : m.delta >= 0 ? 'Added' : 'Removed',
+        { text: `${m.delta >= 0 ? '+' : '−'}${fmtQty(Math.abs(m.delta))}`, color: m.delta >= 0 ? PT.ok : PT.failed, bold: true }, `${fmtQty(m.balance)} ${it?.unit || ''}`,
+        clip([m.expId ? (expMap[m.expId] ? expNum(expMap[m.expId]) + ' ' + (expMap[m.expId].title || '') : 'deleted exp.') : '', m.note].filter(Boolean).join(' · '), 28)]; }),
+      { per: 13, fontSize: 10, rowH: 0.28, empty: 'No movements.' });
   }
-  return { title: 'Storage inventory', html: reportDoc('Storage inventory', h), file: `LabTrack_Report_Storage_${todayISO()}.html` };
-}
-
-function openReport(title, html, file) {
-  const blob = new Blob([html], { type: 'text/html' }), src = URL.createObjectURL(blob);
-  const ov = document.createElement('div');
-  ov.className = 'reportview';
-  ov.innerHTML = `<div class="rv-top"><button class="icon" data-a="close" title="Close">${I.close}</button><b class="rv-title">${esc(title)}</b>
-    <button class="btn" data-a="dl">${I.download} HTML</button><button class="btn primary" data-a="print">Print / PDF</button></div>
-    <iframe title="Report"></iframe>`;
-  document.body.appendChild(ov);
-  const frame = $('iframe', ov); frame.src = src;
-  let closed = false;
-  const doClose = () => { if (closed) return; closed = true; ov.remove(); setTimeout(() => URL.revokeObjectURL(src), 1000); removeEventListener('popstate', doClose); };
-  history.pushState({ report: 1 }, '', location.href);
-  addEventListener('popstate', doClose);
-  $('[data-a=close]', ov).onclick = () => history.back();
-  $('[data-a=print]', ov).onclick = () => { try { frame.contentWindow.focus(); frame.contentWindow.print(); } catch (e) { toast('Printing not available here – download the HTML and print it from the browser', 4000); } };
-  $('[data-a=dl]', ov).onclick = () => {
-    const a = document.createElement('a'); a.href = src; a.download = file; document.body.appendChild(a); a.click(); a.remove();
-    toast(`Saved ${file} (${fmtSize(blob.size)})`, 3000);
-  };
+  return { pres, file: `LabTrack_Report_Storage_${todayISO()}.pptx` };
 }
 
 /* =========================================================

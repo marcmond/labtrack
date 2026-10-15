@@ -263,3 +263,28 @@ table.calc .wrap{white-space:normal;min-width:90px}
 /* v1.7 absorbance readings */
 .absbox{background:var(--bg);border-radius:12px;padding:10px 12px 12px;margin:2px 0 12px}
 .absbox input{background:var(--card)}
+
+/* v1.8 zoom & crop */
+.v-img{position:relative;overflow:hidden;touch-action:none;cursor:zoom-in;user-select:none}
+.v-img img{position:absolute;inset:0;width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;transform-origin:0 0;will-change:transform}
+.v-zoombar{position:absolute;left:50%;transform:translateX(-50%);bottom:calc(16px + env(safe-area-inset-bottom));display:flex;align-items:center;gap:8px;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:12px;z-index:2}
+.v-zoombar .btn{background:rgba(255,255,255,.12);color:#fff;border-color:transparent;min-height:36px;padding:6px 10px;font-size:13px}
+.v-zl{color:#fff;font-weight:700;font-size:13px;min-width:36px;text-align:center}
+.v-nav.dim{opacity:.25}
+.v-tag{background:var(--accent);color:var(--on-accent);border-radius:6px;padding:0 6px;font-size:12px;font-weight:700}
+.cropper{position:fixed;inset:0;z-index:70;background:#000;display:flex;flex-direction:column;color:#fff}
+.cr-top,.cr-bar{display:flex;align-items:center;gap:8px;padding:8px 10px}
+.cr-top{padding-top:calc(8px + env(safe-area-inset-top))}
+.cr-bar{padding-bottom:calc(10px + env(safe-area-inset-bottom));flex-wrap:wrap}
+.cr-title{flex:1;text-align:center}
+.cr-bar .btn,.cr-top .btn:not(.primary){background:rgba(255,255,255,.12);color:#fff;border-color:transparent}
+.cr-size{margin-left:auto;font-size:13px;color:#bbb}
+.cr-stage{flex:1;position:relative;overflow:hidden;touch-action:none;user-select:none}
+.cr-stage img{position:absolute;pointer-events:none}
+.cr-rect{position:absolute;border:2px solid #fff;box-shadow:0 0 0 9999px rgba(0,0,0,.55);cursor:move;touch-action:none}
+.cr-rect span{position:absolute;width:26px;height:26px;background:#fff;border-radius:50%;border:3px solid var(--accent)}
+.cr-rect span[data-h=nw]{left:-13px;top:-13px;cursor:nwse-resize}.cr-rect span[data-h=ne]{right:-13px;top:-13px;cursor:nesw-resize}
+.cr-rect span[data-h=sw]{left:-13px;bottom:-13px;cursor:nesw-resize}.cr-rect span[data-h=se]{right:-13px;bottom:-13px;cursor:nwse-resize}
+.cr-grid{position:absolute;inset:0;pointer-events:none;background:
+  linear-gradient(to right,transparent 33.2%,rgba(255,255,255,.35) 33.3%,transparent 33.5%,transparent 66.5%,rgba(255,255,255,.35) 66.6%,transparent 66.8%),
+  linear-gradient(to bottom,transparent 33.2%,rgba(255,255,255,.35) 33.3%,transparent 33.5%,transparent 66.5%,rgba(255,255,255,.35) 66.6%,transparent 66.8%)}

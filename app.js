@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '1.9.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -44,6 +44,7 @@ const I = {
   search: svg('<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>'),
   cells: svg('<circle cx="8" cy="9" r="4.5"/><circle cx="16.5" cy="15.5" r="4.5"/><circle cx="17" cy="5.5" r="2"/><circle cx="6" cy="18" r="1.5"/>'),
   crop: svg('<path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/>'),
+  cloud: svg('<path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>'),
   grid: svg('<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>'),
 };
 
@@ -112,8 +113,26 @@ async function tx(stores, mode, fn) {
   const d = await db();
   return new Promise((res, rej) => {
     const t = d.transaction(stores, mode); let out;
-    Promise.resolve(fn(t)).then(v => { out = v; }).catch(e => { try { t.abort(); } catch { } rej(e); });
-    t.oncomplete = () => res(out);
+    // record deletions of synced records (tombstones) and schedule a sync after local changes
+    const deleted = [];
+    const wrap = (store, name) => new Proxy(store, {
+      get(target, prop) {
+        if (prop === 'delete' && SYNC_STORES[name]) return key => {
+          if (!sync.applying) { deleted.push(SYNC_STORES[name] + ':' + key); if (name === 'items') deleted.push('m:' + key); }
+          return target.delete(key);
+        };
+        const v = Reflect.get(target, prop, target);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const tw = { objectStore: name => wrap(t.objectStore(name), name) };
+    Promise.resolve(fn(tw)).then(v => { out = v; }).catch(e => { try { t.abort(); } catch { } rej(e); });
+    t.oncomplete = () => {
+      res(out);
+      if (mode === 'readwrite' && !sync.applying && (typeof stores === 'string' ? [stores] : stores).some(n => n !== 'meta')) {
+        if (deleted.length) addTombs(deleted).then(() => scheduleSync()); else scheduleSync();
+      }
+    };
     t.onerror = () => rej(t.error);
     t.onabort = () => rej(t.error || new Error('Transaction aborted'));
   });
@@ -466,7 +485,7 @@ async function getModels() { const m = await get('meta', 'models'); return [...n
 async function addModel(name) {
   const m = (await get('meta', 'models')) || { key: 'models', list: [] };
   if (!m.list.includes(name) && !MODELS.includes(name)) m.list.push(name);
-  await put('meta', m);
+  m.updatedAt = now(); await put('meta', m);
 }
 function modelOptions(models, cur) {
   return `${cur && !models.includes(cur) ? `<option selected>${esc(cur)}</option>` : ''}<option value="" ${!cur ? 'selected' : ''}>— select model —</option>
@@ -888,7 +907,7 @@ async function viewStaining(expId, sid) {
     // remember dilutions + optional stock deduction
     const skipped = [];
     const used = [...s.primary, ...s.secondary].filter(a => abItems.some(it => it.id === a.itemId));
-    for (const a of used) { const it = await get('items', a.itemId); if (it && it.abDilution !== a.dilution) { it.abDilution = a.dilution; await put('items', it); } }
+    for (const a of used) { const it = await get('items', a.itemId); if (it && it.abDilution !== a.dilution) { it.abDilution = a.dilution; it.updatedAt = now(); await put('items', it); } }
     if (f.deduct?.checked && !s.deducted) {
       for (const a of used) {
         const it = await get('items', a.itemId), k = VOL_UNIT_UL[it.unit];
@@ -1162,8 +1181,9 @@ function openViewer(list, start, onChanged) {
     if (!res) return;
     const rec = await get('photos', p.id);
     if (!rec) return;
-    if (res === 'remove') { delete rec.crop; delete rec.cropBlob; }
-    else { rec.crop = res.rect; rec.cropBlob = res.blob; }
+    if (res === 'remove') { delete rec.crop; delete rec.cropBlob; delete rec.cropU; }
+    else { rec.crop = res.rect; rec.cropBlob = res.blob; rec.cropU = now(); }
+    rec.updatedAt = now();
     await put('photos', rec);
     Object.assign(p, { crop: rec.crop, cropBlob: rec.cropBlob }); if (res === 'remove') { delete p.crop; delete p.cropBlob; }
     URL.revokeObjectURL(urls[i]); urls[i] = URL.createObjectURL(photoBlob(p));
@@ -1188,7 +1208,7 @@ function openViewer(list, start, onChanged) {
     if (clash && !await confirmDlg('Replace?', `There is already a photo for Day ${nd}. It will be replaced by this one.`, 'Replace', 'danger')) return;
     await tx(['photos'], 'readwrite', t => {
       const st = t.objectStore('photos'); if (clash) st.delete(clash.id);
-      const { label, ...rec } = p; rec.day = nd; st.put(rec);
+      const { label, ...rec } = p; rec.day = nd; rec.updatedAt = now(); st.put(rec);
     });
     p.day = nd; changed = true; show(); toast('Day changed');
   };
@@ -2494,6 +2514,302 @@ async function deckStorage(PptxGenJS, withHist) {
 }
 
 /* =========================================================
+   GOOGLE DRIVE SYNC (hidden appDataFolder of the user's Drive)
+   Every record is one small file; photos are separate JPEG files.
+   Conflicts: the most recently changed version of a record wins.
+   ========================================================= */
+const SYNC_SCOPE = 'https://www.googleapis.com/auth/drive.appdata';
+const DRIVE = 'https://www.googleapis.com/drive/v3', DRIVE_UP = 'https://www.googleapis.com/upload/drive/v3';
+const SYNC_STORES = { experiments: 'e', chips: 'c', photos: 'p', expansions: 'x', items: 'i' };
+const sync = { token: null, exp: 0, running: false, queued: false, state: 'off', msg: '', timer: null, applying: false, progress: '' };
+class SyncAuthError extends Error { constructor() { super('Google sign-in needed'); } }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function syncCfg() { return (await get('meta', 'sync')) || { key: 'sync', clientId: '', enabled: false, lastSync: null }; }
+async function saveSyncCfg(c) { await tx(['meta'], 'readwrite', t => { t.objectStore('meta').put(c); }); }
+
+/* deletions are remembered as tombstones so they reach the other devices */
+async function addTombs(keys) {
+  if (!keys.length) return;
+  const d = await db();
+  await new Promise(res => {
+    const t = d.transaction(['meta'], 'readwrite'), s = t.objectStore('meta');
+    const r = s.get('tombs');
+    r.onsuccess = () => { const tb = r.result || { key: 'tombs', map: {} }; const at = now(); keys.forEach(k => { tb.map[k] = at; }); s.put(tb); };
+    t.oncomplete = res; t.onerror = res;
+  });
+}
+function scheduleSync(delay = 4000) {
+  if (sync.state === 'off') return;
+  clearTimeout(sync.timer);
+  sync.timer = setTimeout(() => runSync(false), delay);
+  if (sync.state === 'ok') setSyncState('pending');
+}
+
+/* ---- sign-in (Google Identity Services, token model) ---- */
+let gisP = null;
+function loadGis() {
+  if (window.google?.accounts?.oauth2) return Promise.resolve();
+  return gisP ||= new Promise((res, rej) => {
+    const s = document.createElement('script'); s.src = 'https://accounts.google.com/gsi/client'; s.async = true;
+    s.onload = () => res(); s.onerror = () => { gisP = null; rej(new Error('Could not reach Google – are you offline?')); };
+    document.head.appendChild(s);
+  });
+}
+async function getToken(interactive) {
+  if (sync.token && Date.now() < sync.exp - 60000) return sync.token;
+  const t = await get('meta', 'synctoken');
+  if (t && Date.now() < t.exp - 60000) { sync.token = t.token; sync.exp = t.exp; return t.token; }
+  if (!interactive) return null;
+  const cfg = await syncCfg();
+  if (!cfg.clientId) throw new Error('Enter the Google Client ID in Settings first');
+  await loadGis();
+  return new Promise((res, rej) => {
+    const client = google.accounts.oauth2.initTokenClient({
+      client_id: cfg.clientId, scope: SYNC_SCOPE, prompt: cfg.connected ? '' : 'consent',
+      callback: async r => {
+        if (r.error) return rej(new Error(r.error_description || r.error));
+        sync.token = r.access_token; sync.exp = Date.now() + (+r.expires_in || 3600) * 1000;
+        await put('meta', { key: 'synctoken', token: sync.token, exp: sync.exp });
+        res(sync.token);
+      },
+      error_callback: e => rej(new Error(e?.type === 'popup_closed' ? 'Sign-in window closed' : (e?.message || 'Sign-in failed'))),
+    });
+    client.requestAccessToken();
+  });
+}
+
+/* ---- Drive REST helpers ---- */
+async function dfetch(url, opts = {}, tries = 3) {
+  const tok = await getToken(false);
+  if (!tok) throw new SyncAuthError();
+  let r;
+  try { r = await fetch(url, { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + tok } }); }
+  catch (e) { if (tries > 1) { await sleep(1500); return dfetch(url, opts, tries - 1); } throw new Error('Network error – are you offline?'); }
+  if (r.status === 401) { sync.token = null; await del('meta', 'synctoken'); throw new SyncAuthError(); }
+  if ((r.status === 429 || r.status === 403 || r.status >= 500) && tries > 1) { await sleep(2000 * (4 - tries)); return dfetch(url, opts, tries - 1); }
+  if (!r.ok) throw new Error(`Google Drive error ${r.status}: ${(await r.text()).slice(0, 160)}`);
+  return r;
+}
+async function dList() {
+  const files = []; let page = '';
+  do {
+    const j = await (await dfetch(`${DRIVE}/files?spaces=appDataFolder&pageSize=1000&fields=nextPageToken,files(id,name,appProperties)${page ? '&pageToken=' + encodeURIComponent(page) : ''}`)).json();
+    files.push(...(j.files || [])); page = j.nextPageToken;
+  } while (page);
+  return files;
+}
+async function dPut(existing, key, props, body, type) {
+  const b = 'lt' + Math.random().toString(36).slice(2);
+  const meta = existing ? { appProperties: props } : { name: key.replace(':', '_') + (type === 'image/jpeg' ? '.jpg' : '.json'), parents: ['appDataFolder'], appProperties: props };
+  const payload = new Blob([`--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(meta)}\r\n--${b}\r\nContent-Type: ${type}\r\n\r\n`, body, `\r\n--${b}--`]);
+  const u = existing ? `${DRIVE_UP}/files/${existing.id}?uploadType=multipart&fields=id,name,appProperties` : `${DRIVE_UP}/files?uploadType=multipart&fields=id,name,appProperties`;
+  return (await dfetch(u, { method: existing ? 'PATCH' : 'POST', headers: { 'Content-Type': `multipart/related; boundary=${b}` }, body: payload })).json();
+}
+const dJson = async id => (await dfetch(`${DRIVE}/files/${id}?alt=media`)).json();
+const dBlob = async id => { const bl = await (await dfetch(`${DRIVE}/files/${id}?alt=media`)).blob(); return bl.type === 'image/jpeg' ? bl : new Blob([bl], { type: 'image/jpeg' }); };
+const dDelete = id => dfetch(`${DRIVE}/files/${id}`, { method: 'DELETE' }).catch(() => { });
+async function pool(items, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => { while (i < items.length) { const it = items[i++]; await fn(it); } })); }
+
+/* ---- local index: key -> { u, obj } ---- */
+async function localIndex() {
+  const [exps, chips, photos, xs, items, movs, models] = await Promise.all([all('experiments'), all('chips'), all('photos'), all('expansions'), all('items'), all('movements'), get('meta', 'models')]);
+  const idx = new Map();
+  const u = o => o.updatedAt || o.createdAt || 0;
+  exps.forEach(o => idx.set('e:' + o.id, { u: u(o), obj: o }));
+  chips.forEach(o => idx.set('c:' + o.id, { u: u(o), obj: o }));
+  photos.forEach(o => idx.set('p:' + o.id, { u: u(o), obj: o }));
+  xs.forEach(o => idx.set('x:' + o.id, { u: u(o), obj: o }));
+  items.forEach(o => idx.set('i:' + o.id, { u: u(o), obj: o }));
+  for (const [itemId, list] of Object.entries(groupBy(movs, 'itemId'))) idx.set('m:' + itemId, { u: Math.max(...list.map(m => Date.parse(m.date) || 0)), n: list.length, obj: list });
+  if (models) idx.set('meta:models', { u: models.updatedAt || 0, obj: models });
+  return idx;
+}
+const STORE_OF = { e: 'experiments', c: 'chips', p: 'photos', x: 'expansions', i: 'items' };
+
+function setSyncState(state, msg = '') {
+  sync.state = state; sync.msg = msg;
+  const b = $('#syncBtn');
+  if (b) {
+    b.hidden = state === 'off';
+    b.className = 'icon syncbtn s-' + state;
+    b.title = { ok: 'Synced with Google Drive', pending: 'Changes waiting to sync', syncing: 'Syncing…' + (sync.progress ? ' ' + sync.progress : ''), auth: 'Tap to reconnect Google Drive and sync', error: 'Sync error – tap to retry: ' + msg, offline: 'Offline – will sync later' }[state] || '';
+  }
+  if (location.hash.startsWith('#/settings') && $('#syncStatus')) $('#syncStatus').innerHTML = syncStatusText();
+}
+function syncStatusText() {
+  return { off: 'Not connected', ok: '✓ Synced', pending: 'Changes waiting to sync', syncing: 'Syncing… ' + esc(sync.progress), auth: 'Sign-in needed – tap <b>Sync now</b>', error: '⚠ ' + esc(sync.msg), offline: 'Offline – will sync when online' }[sync.state] || '';
+}
+
+async function runSync(interactive) {
+  const cfg = await syncCfg();
+  if (!cfg.enabled || !cfg.clientId) { setSyncState('off'); return; }
+  if (sync.running) { sync.queued = true; return; }
+  if (!navigator.onLine) { setSyncState('offline'); return; }
+  sync.running = true; sync.progress = ''; setSyncState('syncing');
+  let changedLocal = false;
+  try {
+    if (!await getToken(interactive)) throw new SyncAuthError();
+    const files = await dList();
+    const remote = new Map();
+    for (const f of files) {
+      const k = f.appProperties?.k; if (!k) continue;
+      const rec = { f, u: +f.appProperties.u || 0, d: f.appProperties.d === '1', n: +f.appProperties.n || 0, cu: +f.appProperties.cu || 0 };
+      const prev = remote.get(k);
+      if (prev) { const keep = prev.u >= rec.u ? prev : rec, drop = keep === prev ? rec : prev; dDelete(drop.f.id); remote.set(k, keep); } else remote.set(k, rec);
+    }
+    const local = await localIndex();
+    const tb = (await get('meta', 'tombs')) || { key: 'tombs', map: {} };
+    const keys = new Set([...local.keys(), ...Object.keys(tb.map), ...[...remote.keys()].filter(k => !/^p[bc]:/.test(k))]);
+    const downs = [], ups = [], merges = [], delLocal = [], tombUps = [];
+    for (const k of keys) {
+      const L = local.get(k), R = remote.get(k), T = tb.map[k];
+      if (k.startsWith('m:')) {
+        if (R?.d) { if (L) delLocal.push(k); continue; }
+        if (!L && T) { if (R) tombUps.push(k); continue; }
+        if (L && !R) ups.push(k);
+        else if (R && (!L || L.n !== R.n || L.u !== R.u)) merges.push(k);
+        continue;
+      }
+      if (L) {
+        if (!R) ups.push(k);
+        else if (R.d) { if (R.u >= L.u) delLocal.push(k); else ups.push(k); }
+        else if (L.u > R.u) ups.push(k);
+        else if (R.u > L.u) downs.push(k);
+        else if (k.startsWith('p:') && !remote.get('pb:' + k.slice(2))) ups.push(k);   // photo file missing remotely
+      } else if (T) {
+        if (R && !R.d) { if (R.u <= T) tombUps.push(k); else downs.push(k); }
+      } else if (R && !R.d) downs.push(k);
+    }
+    const total = downs.length + ups.length + merges.length + delLocal.length + tombUps.length;
+    let done = 0;
+    const tick = () => { done++; sync.progress = `${done}/${total}`; if (done % 5 === 0 || done === total) setSyncState('syncing'); };
+    // order matters little (each record is independent); download parents first for nicer partial states
+    const order = k => ({ e: 0, x: 0, i: 0, c: 1, m: 1, p: 2 }[k[0]] ?? 0);
+    downs.sort((a, b) => order(a) - order(b));
+    sync.applying = true;
+    // ---- downloads
+    await pool(downs, 4, async k => {
+      const R = remote.get(k), [type, id] = [k.slice(0, k.indexOf(':')), k.slice(k.indexOf(':') + 1)];
+      const obj = await dJson(R.f.id);
+      if (type === 'meta') { await put('meta', { ...obj, key: 'models' }); }
+      else if (type === 'p') {
+        const L = local.get(k)?.obj;
+        let blob = L?.blob;
+        if (!blob) { const pb = remote.get('pb:' + id); if (!pb) { tick(); return; } blob = await dBlob(pb.f.id); }
+        let cropBlob = null;
+        if (obj.hasCrop) {
+          if (L?.cropBlob && (L.cropU || 0) >= (obj.cropU || 0)) cropBlob = L.cropBlob;
+          else { const pc = remote.get('pc:' + id); if (pc) cropBlob = await dBlob(pc.f.id); }
+        }
+        const { hasCrop, ...meta } = obj;
+        const rec = { ...meta, blob }; if (cropBlob) rec.cropBlob = cropBlob; else { delete rec.cropBlob; delete rec.crop; }
+        await put('photos', rec);
+      } else await put(STORE_OF[type], obj);
+      changedLocal = true; tick();
+    });
+    // ---- movement groups: union both sides
+    await pool(merges, 3, async k => {
+      const R = remote.get(k), L = local.get(k);
+      const rl = R ? await dJson(R.f.id) : [], ll = L?.obj || [];
+      const byId = new Map(); [...rl, ...ll].forEach(m => byId.set(m.id, m));
+      const missing = rl.filter(m => !ll.some(x => x.id === m.id));
+      if (missing.length) { await tx(['movements'], 'readwrite', t => { missing.forEach(m => t.objectStore('movements').put(m)); }); changedLocal = true; }
+      const union = [...byId.values()];
+      if (!R || union.length !== R.n) await dPut(R?.f, k, { k, u: String(Math.max(...union.map(m => Date.parse(m.date) || 0))), n: String(union.length) }, JSON.stringify(union), 'application/json');
+      tick();
+    });
+    // ---- deletions coming from other devices
+    for (const k of delLocal) {
+      const [type, id] = [k.slice(0, k.indexOf(':')), k.slice(k.indexOf(':') + 1)];
+      if (type === 'm') await tx(['movements'], 'readwrite', async t => { const s = t.objectStore('movements'); (await reqP(s.index('itemId').getAllKeys(id))).forEach(x => s.delete(x)); });
+      else if (STORE_OF[type]) await del(STORE_OF[type], id);
+      changedLocal = true; tick();
+    }
+    // stock quantities are rebuilt from the merged movement history, so changes made on two devices add up
+    if (await recomputeQuantities()) changedLocal = true;
+    sync.applying = false;
+    // ---- uploads
+    await pool(ups, 4, async k => {
+      const L = local.get(k), R = remote.get(k), type = k.slice(0, k.indexOf(':')), id = k.slice(k.indexOf(':') + 1);
+      if (type === 'm') { await dPut(R?.f, k, { k, u: String(L.u), n: String(L.n) }, JSON.stringify(L.obj), 'application/json'); tick(); return; }
+      if (type === 'p') {
+        const p = L.obj, pb = remote.get('pb:' + id), pc = remote.get('pc:' + id);
+        if (!pb) await dPut(null, 'pb:' + id, { k: 'pb:' + id, u: String(p.createdAt || 0) }, p.blob, 'image/jpeg');
+        const cropU = p.cropBlob ? (p.cropU || p.updatedAt || 0) : 0;
+        if (p.cropBlob && (!pc || pc.u < cropU)) await dPut(pc?.f, 'pc:' + id, { k: 'pc:' + id, u: String(cropU) }, p.cropBlob, 'image/jpeg');
+        const { blob, cropBlob, label, ...meta } = p;
+        await dPut(R?.f, k, { k, u: String(L.u) }, JSON.stringify({ ...meta, cropU, hasCrop: !!cropBlob }), 'application/json');
+        if (!cropBlob && pc) dDelete(pc.f.id);
+      } else await dPut(R?.f, k, { k, u: String(L.u) }, JSON.stringify(L.obj), 'application/json');
+      tick();
+    });
+    // ---- our deletions -> tombstones on Drive
+    await pool(tombUps, 4, async k => {
+      const R = remote.get(k);
+      await dPut(R.f, k, { k, u: String(tb.map[k]), d: '1' }, '{"deleted":true}', 'application/json');
+      if (k.startsWith('p:')) { const id = k.slice(2); ['pb:', 'pc:'].forEach(pre => { const f = remote.get(pre + id); if (f) dDelete(f.f.id); }); }
+      tick();
+    });
+    // forget tombstones older than 90 days
+    const cut = now() - 90 * 864e5; let pruned = false;
+    for (const [k, t] of Object.entries(tb.map)) if (t < cut) { delete tb.map[k]; pruned = true; }
+    if (pruned) await put('meta', tb);
+    cfg.lastSync = new Date().toISOString(); cfg.connected = true; await saveSyncCfg(cfg);
+    sync.progress = '';
+    setSyncState('ok');
+    if (changedLocal && !$('dialog[open]') && !$('.viewer') && !$('.cropper') && !document.activeElement?.matches('input,textarea,select')) rerender();
+    else if (changedLocal) toast('Synced – new data from your other devices', 3000);
+  } catch (e) {
+    sync.applying = false;
+    if (e instanceof SyncAuthError) setSyncState('auth');
+    else if (!navigator.onLine) setSyncState('offline');
+    else { console.error(e); setSyncState('error', e.message); }
+  } finally {
+    sync.running = false;
+    if (sync.queued) { sync.queued = false; scheduleSync(1500); }
+  }
+}
+
+async function recomputeQuantities() {
+  const [items, movs] = await Promise.all([all('items'), all('movements')]);
+  const by = groupBy(movs, 'itemId'); let changed = false;
+  for (const it of items) {
+    const list = (by[it.id] || []).sort((a, b) => a.date.localeCompare(b.date));
+    if (!list.length) continue;
+    let q = 0;
+    for (const m of list) q = m.type === 'set' ? Number(m.balance) : round(q + Number(m.delta));
+    if (round(q) !== round(Number(it.quantity))) { it.quantity = round(q); await put('items', it); changed = true; }
+  }
+  return changed;
+}
+async function initSync() {
+  const cfg = await syncCfg();
+  if (!cfg.enabled || !cfg.clientId) { setSyncState('off'); return; }
+  setSyncState('pending');
+  loadGis().catch(() => { });
+  $('#syncBtn').onclick = () => runSync(true);
+  runSync(false);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') runSync(false); });
+  addEventListener('online', () => runSync(false));
+  setInterval(() => { if (document.visibilityState === 'visible') runSync(false); }, 5 * 60 * 1000);
+}
+async function connectSync(clientId) {
+  const cfg = await syncCfg();
+  cfg.clientId = clientId.trim(); cfg.enabled = true; await saveSyncCfg(cfg);
+  sync.state = 'pending';
+  await getToken(true);
+  if (!$('#syncBtn').onclick) initSync(); else await runSync(true);
+}
+async function disconnectSync() {
+  const cfg = await syncCfg();
+  try { if (sync.token && window.google?.accounts?.oauth2) google.accounts.oauth2.revoke(sync.token, () => { }); } catch { }
+  sync.token = null; await del('meta', 'synctoken');
+  cfg.enabled = false; cfg.connected = false; await saveSyncCfg(cfg);
+  setSyncState('off');
+}
+
+/* =========================================================
    SETTINGS
    ========================================================= */
 let installEvt = null;
@@ -2504,10 +2820,20 @@ async function viewSettings() {
   let est = null; try { est = await navigator.storage?.estimate(); } catch { }
   let persisted = false; try { persisted = await navigator.storage?.persisted(); } catch { }
   const standalone = matchMedia('(display-mode: standalone)').matches;
+  const scfg = await syncCfg();
   main.innerHTML = `
-  <div class="sec-head"><h2>Move data between devices</h2></div>
+  <div class="sec-head"><h2>Sync between devices</h2></div>
+  <section class="card" id="syncCard">
+    <div class="kv"><span>Status</span><b id="syncStatus">${syncStatusText()}</b></div>
+    ${scfg.lastSync ? `<div class="kv"><span>Last sync</span><b>${fmtDateTime(scfg.lastSync)}</b></div>` : ''}
+    <p class="muted" style="font-size:13px">Your data is kept in a hidden LabTrack folder of <b>your own Google Drive</b> and synced automatically between all devices connected with the same Google account. Each device keeps working offline. When the same record is changed on two devices, the most recent change wins.</p>
+    <label>Google OAuth Client ID<input id="syncClient" value="${esc(scfg.clientId)}" placeholder="1234-abc.apps.googleusercontent.com" ${scfg.enabled ? 'readonly' : ''}></label>
+    ${scfg.enabled ? `<div class="cap-row"><button class="btn primary" id="syncNow">${I.cloud} Sync now</button><button class="btn" id="syncOff">Disconnect</button></div>`
+      : `<button class="btn primary big" id="syncOn">${I.cloud} Connect Google Drive</button>`}
+  </section>
+  <div class="sec-head"><h2>Backup & manual transfer</h2></div>
   <section class="card">
-    <p class="muted" style="margin-top:0">Data is stored only on this device. To move an experiment or a cell expansion, open it and tap ${I.download} <b>Export</b>. For consumables use the storage export below. Then import the file on the other device.</p>
+    <p class="muted" style="margin-top:0">Without sync, data is stored only on this device. To back up or move an experiment or a cell expansion, open it and tap ${I.download} <b>Export</b>. For consumables use the storage export below. Then import the file on the other device.</p>
     <div class="cap-row"><button class="btn primary" id="imp">${I.upload} Import file</button></div>
     <div class="cap-row"><button class="btn" id="expSt">${I.download} Export storage (data file or report)</button></div>
   </section>
@@ -2531,6 +2857,17 @@ async function viewSettings() {
     <div class="kv"><span>Photo size</span><b>${PHOTO_MAX} px, JPEG</b></div>
   </section>`;
   $('#imp').onclick = importFromFile;
+  $('#syncOn') && ($('#syncOn').onclick = async () => {
+    const id = $('#syncClient').value.trim();
+    if (!/\.apps\.googleusercontent\.com$/.test(id)) { toast('Paste the Client ID (it ends with .apps.googleusercontent.com)', 4000); return; }
+    try { await connectSync(id); toast('Google Drive connected', 2500); } catch (e) { toast('Could not connect: ' + e.message, 5000); }
+    rerender();
+  });
+  $('#syncNow') && ($('#syncNow').onclick = () => runSync(true));
+  $('#syncOff') && ($('#syncOff').onclick = async () => {
+    if (!await confirmDlg('Disconnect sync?', 'This device stops syncing. Data already on this device and on Google Drive is kept.', 'Disconnect')) return;
+    await disconnectSync(); rerender();
+  });
   $('#updSet') && ($('#updSet').onclick = applyUpdate);
   $('#chkUpd') && ($('#chkUpd').onclick = checkForUpdate);
   $('#expSt').onclick = () => exportMenu('storage');
@@ -2592,6 +2929,8 @@ async function checkForUpdate() {
   tabs[2].innerHTML = I.cells + '<span>Expansion</span>';
   tabs[3].innerHTML = I.gear + '<span>Settings</span>';
   setupUpdates();
+  $('#syncBtn').innerHTML = I.cloud;
+  initSync().catch(e => console.warn('sync', e));
   navigator.storage?.persist?.().catch(() => { });
   route();
 })();

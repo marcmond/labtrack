@@ -288,3 +288,14 @@ table.calc .wrap{white-space:normal;min-width:90px}
 .cr-grid{position:absolute;inset:0;pointer-events:none;background:
   linear-gradient(to right,transparent 33.2%,rgba(255,255,255,.35) 33.3%,transparent 33.5%,transparent 66.5%,rgba(255,255,255,.35) 66.6%,transparent 66.8%),
   linear-gradient(to bottom,transparent 33.2%,rgba(255,255,255,.35) 33.3%,transparent 33.5%,transparent 66.5%,rgba(255,255,255,.35) 66.6%,transparent 66.8%)}
+
+/* v1.9 sync indicator */
+.syncbtn{position:relative;color:var(--muted)}
+.syncbtn.s-ok{color:var(--ok)}
+.syncbtn.s-pending{color:var(--muted)}
+.syncbtn.s-syncing{color:var(--accent)}
+.syncbtn.s-syncing svg{animation:syncpulse 1s ease-in-out infinite}
+.syncbtn.s-auth,.syncbtn.s-offline{color:var(--low)}
+.syncbtn.s-error{color:var(--failed)}
+.syncbtn.s-auth::after,.syncbtn.s-error::after{content:'!';position:absolute;right:4px;top:4px;font-size:11px;font-weight:800;background:currentColor;color:#fff;border-radius:50%;width:14px;height:14px;line-height:14px;text-align:center}
+@keyframes syncpulse{50%{opacity:.35}}

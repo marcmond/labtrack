@@ -24,14 +24,35 @@ Open the address → click the **install icon** at the right end of the address 
 
 When the camera is used the first time, allow camera access.
 
-## 3. Moving data between phone and PC
+## 3. Sync between phone and PC (Google Drive)
 
-Data is not synced automatically.
+LabTrack can keep all your devices in sync through a hidden LabTrack folder in **your own Google Drive**. It does not appear among your Drive files, and only LabTrack can read it. Each device keeps working offline; changes are sent and received automatically when online. If the same record is changed on two devices, the most recent change wins. Stock quantities are rebuilt from the combined movement history, so additions and removals made on different devices add up.
 
-- **Experiment / cell expansion:** open it → tap the ⬇ **Export** icon (top right) → **Data file (.json)** → **Save file**. Copy the `.json` file to the other device (Google Drive, OneDrive, e-mail, USB) → in LabTrack there: **Settings → Import file** (or the ⬆ icon on the Experiments list).
-  - If the experiment doesn't exist there yet, it is added.
-  - If it exists, the two are **merged**: newer info/chamber changes win, new photos are added; for the same chamber and day the newer photo is kept.
-- **Storage (consumables):** **Settings → Export storage**, then import the same way. Items are merged (most recently changed version wins; history is combined).
+### One-time setup (about 10 minutes, on the PC)
+
+1. Go to **https://console.cloud.google.com** and sign in with the Google account you want to use.
+2. Top bar → project menu → **New project** → name `LabTrack` → **Create**, then select it.
+3. Menu ☰ → **APIs & Services** → **Library** → search **Google Drive API** → **Enable**.
+4. ☰ → **APIs & Services** → **OAuth consent screen** (may be called **Google Auth Platform**) → **Get started**:
+   - App name `LabTrack`, your e-mail → **Next** → Audience **External** → **Next** → contact e-mail → **Next** → agree → **Create**.
+   - **Audience** → **Test users** → **Add users** → your Gmail address → **Save** (or click **Publish app** so you don't need test users).
+5. **Clients** (or **Credentials** → **Create credentials** → **OAuth client ID**):
+   - Application type **Web application**, name `LabTrack`.
+   - **Authorized JavaScript origins** → **Add URI** → `https://marcmond.github.io` (no path, no trailing slash).
+   - **Create** and copy the **Client ID** (ends with `.apps.googleusercontent.com`).
+
+### On every device
+
+1. LabTrack → **Settings** → **Sync between devices**.
+2. Paste the **Client ID** → **Connect Google Drive** → choose your Google account → **Allow**.
+   (If Google shows "Google hasn't verified this app", click **Continue** – it is your own app.)
+3. The first sync uploads/downloads everything; the cloud icon at the top turns green when done.
+
+The cloud icon at the top shows the state: green = synced, pulsing = syncing, orange with ! = tap to sign in again (Google asks roughly once an hour of use), red = error (tap to retry).
+
+### Backup & manual transfer
+
+You can still export single experiments, expansions or the storage as a **Data file (.json)** and import them on another device (**Settings → Import file**) – useful as a backup.
 
 ## Reports
 
@@ -40,7 +61,6 @@ The ⬇ **Export** button (experiment, cell expansion, and Storage / Settings fo
 - **Data file (.json)** – for moving data between devices and backups (can be imported back).
 - **Report (.pptx)** – a 16:9 PowerPoint presentation with all the information (chip map, conditions, chamber details, medium changes, stainings, consumables, expansion charts and tables, inventory) and optionally the photos – cropped photos appear cropped. Opens in PowerPoint, Google Slides or Keynote.
 
-Tip: exporting is also your backup. Export finished experiments and keep the files in a cloud folder.
 
 ## 4. Updating the app
 

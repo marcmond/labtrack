@@ -1,5 +1,5 @@
 // LabTrack service worker – offline app shell (stale-while-revalidate).
-const CACHE = 'labtrack-v1.8.0';
+const CACHE = 'labtrack-v1.9.0';
 const ASSETS = ['./', './index.html', './app.js', './styles.css', './manifest.webmanifest', './icons/icon-192.png', './icons/icon-512.png'];
 const PPTX_CDN = 'https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.bundle.js';
 self.addEventListener('install', e => {

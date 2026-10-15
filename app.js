@@ -2,7 +2,7 @@
 /* LabTrack – experiments, chip chambers, daily photos, consumables storage.
    All data is stored locally in IndexedDB on this device. */
 
-const APP_VERSION = '1.9.0';
+const APP_VERSION = '1.10.0';
 const MODELS = ['Lung-IPF', 'Lung-COPD', 'Heart-video', 'Heart-Electrophysiology', 'Knee', 'Synovium', 'Gut', 'Scar'];
 const COPD_MODEL = 'Lung-COPD';
 const CSE_REF = 0.07;            // CSE fraction = 0.07 / absorbance
@@ -2101,7 +2101,7 @@ async function exportMenu(kind, id) {
   if (r.action !== 'report') return;
   toast('Building presentation…', 60000);
   try {
-    const PptxGenJS = await loadPptx();
+    const PptxGenJS = await loadPptx(); await prepLogo();
     const rep = kind === 'exp' ? await deckExperiment(PptxGenJS, id, !!r.data.photos)
       : kind === 'cexp' ? await deckExpansion(PptxGenJS, id, !!r.data.photos) : await deckStorage(PptxGenJS, !!r.data.hist);
     const blob = await rep.pres.write({ outputType: 'blob' });
@@ -2123,10 +2123,24 @@ function loadPptx() {
 }
 
 /* ---- deck style (edit here to match another template) ---- */
+/* BiomimX template 2025: red BD1823 / CB4B55 / E9B2B6, greys 4B4846 / 737070 / C3C2C2 / ECEDED, font Raleway */
 const PT = {
-  font: 'Calibri', dark: '0B3B3A', primary: '0F766E', accent: '14B8A6', soft: 'E6F4F2', text: '1F2933', muted: '667085', line: 'D5DEE4',
-  ok: '2E9D5B', okSoft: 'E1F4E8', low: 'E0B100', lowSoft: 'FFF3C4', failed: 'D64545', failedSoft: 'FDE2E2', white: 'FFFFFF', zebra: 'F7FAFA',
+  font: 'Raleway', dark: '4B4846', primary: 'BD1823', accent: 'CB4B55', soft: 'F7E5E7', text: '4B4846', muted: '737070', line: 'C3C2C2',
+  ok: '2E9D5B', okSoft: 'E1F4E8', low: 'D9A300', lowSoft: 'FFF3C4', failed: '8E1119', failedSoft: 'F4D3D6', white: 'FFFFFF', zebra: 'F5F5F5', grey: 'ECEDED',
 };
+const PT_LOGO_SVG = '<svg viewBox="0 0 179.98 106.37" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" id="Layer_1" overflow="hidden"><defs></defs><path d="M59.35 105.28C52.66 105.28 47.21 105.28 41.75 104.46 40.79 104.32 39.98 104.05 39.16 103.64 39.02 103.5 38.75 103.5 38.75 103.23 38.75 102.96 39.02 102.96 39.3 102.96 40.12 102.82 40.94 102.69 41.89 102.69 45.16 102.69 48.44 102.69 51.71 102.55 66.72 102.28 80.91 99.28 94.28 92.19 102.06 88.1 109.42 83.46 116.11 77.74 118.02 76.1 119.66 74.2 121.16 72.15 125.53 66.01 129.21 59.47 131.26 52.11 131.94 49.93 132.35 47.61 131.81 45.43 131.26 42.16 129.08 40.39 125.81 39.98 122.4 39.57 119.4 40.66 116.53 42.3 111.89 45.03 108.07 48.84 104.11 52.25 100.43 55.39 96.88 58.66 92.65 61.11 89.38 62.88 85.96 64.11 82.14 63.43 80.09 63.16 78.59 62.2 77.64 60.16 74.91 54.84 75.46 49.53 79.41 44.75 82.41 41.21 85.96 38.48 89.92 36.02 96.06 32.34 102.47 29.07 109.43 26.89 113.39 25.66 117.48 24.84 121.85 24.84 128.4 24.84 133.86 27.29 137.95 32.48 144.09 40.25 147.23 48.98 147.09 58.79 147.09 64.38 145.32 69.42 142.31 74.06 137.94 81.01 132.62 87.28 125.53 91.51 120.89 94.24 115.84 96.28 110.8 98.05 103.3 100.78 95.66 102.69 87.88 103.64 83.92 104.05 79.83 104.32 75.87 104.59 69.73 105 63.86 105.27 59.36 105.27" fill="#BD1823"/><path d="M31.93 80.19C32.2 68.06 34.39 56.19 38.89 44.74 41.48 38.2 45.44 32.47 49.8 26.88 53.89 21.7 58.26 16.79 63.03 12.29 65.9 9.56 69.31 7.93 72.85 6.29 79.13 3.43 85.67 1.52 92.63 0.97 96.86 0.7 100.95 0.7 105.05 1.79 107.92 2.47 110.23 3.97 112.14 6.29 114.05 8.61 114.32 11.33 113.64 14.06 112.68 17.88 110.37 21.01 107.36 23.47 107.09 23.74 106.68 24.15 106.27 23.88 105.86 23.61 106.13 23.06 106.13 22.65 106.54 20.33 107.49 18.15 107.77 15.83 107.91 14.6 108.04 13.38 107.77 12.15 107.36 9.7 105.31 8.2 102.45 8.06 99.04 7.79 96.04 9.29 93.04 10.65 85.13 14.33 79.12 20.19 74.21 27.28 68.48 35.46 64.8 44.46 61.66 53.73 58.66 62.46 56.48 71.32 53.75 80.18 52.39 84.68 50.88 89.18 48.7 93.4 47.61 95.45 46.24 97.35 44.33 98.85 42.69 100.08 41.06 100.08 39.42 99.26 36.83 98.03 35.33 95.72 34.24 93.12 32.33 89.03 31.92 84.67 31.92 80.17" fill="#BD1823"/><path d="M70.26 0.84C69.3 1.66 68.35 2.34 67.53 3.16 55.52 13.11 45.7 24.84 38.88 39.02 34.38 48.43 31.51 58.38 30.42 68.74 29.06 80.74 30.15 92.6 32.88 104.32 32.88 104.59 33.02 104.87 33.02 105.14 33.16 105.69 33.02 105.96 32.47 105.96 28.65 106.1 24.83 106.23 21.01 106.37 20.33 106.37 20.19 106.1 20.05 105.42 19.37 100.92 18.96 96.42 18.69 91.79 18.42 86.88 18.42 81.97 18.69 76.93 19.78 57.16 24.83 38.62 36.02 21.98 41.48 13.94 48.16 6.98 55.94 0.98 56.35 0.71 56.76 0.43 57.3 0.43L69.72 0.43C69.99 0.57 70.13 0.57 70.27 0.84" fill="#4B4846"/><path d="M167.95 60.01C167.95 72.83 165.63 85.23 160.17 96.96 158.94 99.69 157.44 102.28 155.8 104.73 155.53 105.28 155.12 105.55 154.44 105.55 149.66 105.69 144.89 105.82 139.98 105.96 139.71 105.96 139.16 106.1 139.02 105.82 138.88 105.41 139.29 105.14 139.57 105 144.21 99.68 148.17 93.96 151.44 87.68 155.12 80.59 157.44 72.96 158.4 65.05 160.17 50.6 157.31 36.96 151.44 23.88 147.89 15.84 143.39 8.34 138.21 1.11 138.07 0.84 137.66 0.56 137.8 0.29 137.94-0.12 138.48 0.02 138.76 0.02 142.17 0.16 145.58 0.43 149.13 0.57 149.95 0.57 150.36 0.98 150.77 1.66 158.27 13.39 163.32 26.06 166.05 39.7 167.41 46.52 168.1 53.2 167.96 60.01" fill="#4B4846"/><path d="M112.15 1.11C112.42 0.84 112.7 0.97 113.11 0.97 118.43 0.97 123.75 0.97 129.07 1.11 130.16 1.11 131.12 1.38 131.8 2.34 139.3 11.34 146.13 20.61 151.17 31.11 154.85 39.02 157.04 47.33 156.76 56.33 156.49 63.01 154.71 69.42 152.12 75.69 148.85 83.46 144.48 90.69 140.11 97.78 138.61 100.37 136.97 102.82 135.47 105.42 135.06 106.1 134.65 106.24 133.97 106.24 128.79 106.24 123.74 106.24 118.55 106.1 118.28 106.1 117.73 106.24 117.59 105.83 117.45 105.42 118 105.28 118.27 105.01 123.05 101.19 127.55 97.24 131.78 92.74 137.92 86.33 143.1 79.24 146.38 71.06 150.75 60.15 150.34 49.38 145.7 38.61 142.56 31.52 137.92 25.25 132.74 19.52 126.74 12.98 120.05 7.25 112.96 1.93 112.82 1.66 112.41 1.52 112.14 1.11" fill="#4B4846"/><path d="M7.37 86.87C7.37 70.37 9.42 55.1 14.6 40.51 19.65 26.19 27.42 13.65 38.48 3.15 39.16 2.47 39.84 1.92 40.53 1.24 41.08 0.69 41.62 0.56 42.3 0.56L51.99 0.56C52.26 0.56 52.67 0.42 52.81 0.7 52.95 1.11 52.54 1.25 52.26 1.38 47.48 5.61 42.98 10.11 38.75 14.88 28.79 26.2 21.29 38.74 18.01 53.46 15.83 62.73 15.42 72.14 15.83 81.68 16.24 89.59 17.47 97.36 19.1 104.99 19.24 105.94 19.1 106.22 18.14 106.22 15.27 106.08 12.27 106.08 9.41 106.08 8.73 106.08 8.45 105.81 8.45 105.13 8.18 101.99 7.77 98.86 7.63 95.72 7.49 92.45 7.36 89.18 7.36 86.86" fill="#4B4846"/><path d="M179.96 59.06C180.1 71.33 177.5 82.78 173.55 93.83 172.19 97.65 170.68 101.47 168.91 105.15 168.64 105.83 168.23 106.1 167.41 106.1L160.04 106.1C159.77 106.1 159.22 106.24 159.08 105.83 158.94 105.56 159.35 105.28 159.49 105.01 164.13 98.33 167.81 91.1 170.27 83.33 171.91 77.74 173 72.01 173.41 66.29 174.23 52.66 171.64 39.43 166.86 26.75 163.72 18.3 159.77 10.25 155.26 2.48 155.12 2.34 155.12 2.07 154.99 1.93 154.72 1.38 154.72 1.11 155.54 1.11L162.09 1.52C162.64 1.52 162.77 1.93 163.05 2.34 170.55 16.25 176.69 30.7 179.01 46.51 179.69 50.6 180.1 54.96 179.97 59.05" fill="#4B4846"/><path d="M0 91.1C0 74.74 1.64 58.51 6 42.56 9.14 30.7 13.78 19.25 20.46 8.88 22.1 6.43 23.87 3.97 25.64 1.65 26.05 1.1 26.46 0.97 27.14 0.97L35.19 0.97C35.46 0.97 36.01 0.83 36.15 1.11 36.29 1.52 35.88 1.66 35.6 1.93 29.32 8.07 24 15.02 19.77 22.65 14.31 32.47 10.63 42.96 8.72 54.14 7.63 60.41 6.81 66.68 6.54 73.09 6.13 83.59 6.54 93.95 7.77 104.31 8.04 106.63 8.18 106.22 6.13 106.22 4.63 106.22 3.13 106.08 1.63 105.95 0.81 105.95 0.54 105.54 0.4 104.72 0.26 100.22-0.01 95.72-0.01 91.09" fill="#4B4846"/></svg>';
+let PT_LOGO = null;   // PNG data of the logo, prepared before each export
+async function prepLogo() {
+  if (PT_LOGO) return PT_LOGO;
+  try {
+    const img = new Image(); img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(PT_LOGO_SVG);
+    await img.decode();
+    const c = document.createElement('canvas'); c.width = 720; c.height = Math.round(720 * 106.37 / 179.98);
+    c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    PT_LOGO = c.toDataURL('image/png').replace(/^data:/, '');
+  } catch { PT_LOGO = ''; }
+  return PT_LOGO;
+}
 const ST_FILL = { ok: [PT.okSoft, PT.ok], low: [PT.lowSoft, PT.low], failed: [PT.failedSoft, PT.failed] };
 const clip = (s, n = 90) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const chunk = (a, n) => { const out = []; for (let k = 0; k < a.length; k += n) out.push(a.slice(k, k + n)); return out.length ? out : [[]]; };
@@ -2139,11 +2153,14 @@ function newDeck(PptxGenJS, docName) {
   pres.theme = { headFontFace: PT.font, bodyFontFace: PT.font };
   const foot = um(docName).replace(/&/g, 'and');
   pres.defineSlideMaster({
-    title: 'LT_TITLE', background: { color: PT.dark },
+    title: 'LT_TITLE', background: { color: PT.white },
     objects: [
-      { placeholder: { options: { name: 'title', type: 'title', x: 0.6, y: 1.55, w: 8.8, h: 1.25, fontFace: PT.font, fontSize: 36, bold: true, color: PT.white, align: 'left', valign: 'bottom', margin: 0 }, text: '' } },
-      { placeholder: { options: { name: 'body', type: 'body', x: 0.6, y: 2.95, w: 8.8, h: 1.6, fontFace: PT.font, fontSize: 16, color: 'CFE9E5', align: 'left', valign: 'top', margin: 0 }, text: '' } },
-      { text: { text: 'LabTrack report', options: { x: 0.6, y: 5.0, w: 5, h: 0.3, fontFace: PT.font, fontSize: 10, color: '8FC9C1', margin: 0 } } },
+      ...(PT_LOGO ? [{ image: { data: PT_LOGO, x: 8.55, y: 0.33, w: 0.95, h: 0.56 } }] : []),
+      { rect: { x: 0, y: 5.35, w: 10, h: 0.275, fill: { color: PT.primary } } },
+      { rect: { x: 0.6, y: 2.88, w: 1.2, h: 0.06, fill: { color: PT.primary } } },
+      { placeholder: { options: { name: 'title', type: 'title', x: 0.6, y: 1.35, w: 8.8, h: 1.45, fontFace: PT.font, fontSize: 34, bold: true, color: PT.primary, align: 'left', valign: 'bottom', margin: 0 }, text: '' } },
+      { placeholder: { options: { name: 'body', type: 'body', x: 0.6, y: 3.1, w: 8.8, h: 1.5, fontFace: PT.font, fontSize: 16, color: PT.dark, align: 'left', valign: 'top', margin: 0 }, text: '' } },
+      { text: { text: 'LabTrack report', options: { x: 0.6, y: 4.85, w: 5, h: 0.3, fontFace: PT.font, fontSize: 10, color: PT.muted, margin: 0 } } },
     ],
   });
   pres.defineSlideMaster({
@@ -2153,10 +2170,11 @@ function newDeck(PptxGenJS, docName) {
   pres.defineSlideMaster({
     title: 'LT_CONTENT', background: { color: PT.white }, margin: [0.5, 0.5, 0.45, 0.5],
     objects: [
-      { placeholder: { options: { name: 'title', type: 'title', x: 0.5, y: 0.25, w: 9, h: 0.6, fontFace: PT.font, fontSize: 24, bold: true, color: PT.primary, align: 'left', valign: 'middle', margin: 0 }, text: '' } },
-      { text: { text: clip(foot, 80), options: { x: 0.5, y: 5.27, w: 7.5, h: 0.25, fontFace: PT.font, fontSize: 9, color: PT.muted, margin: 0 } } },
+      { placeholder: { options: { name: 'title', type: 'title', x: 0.35, y: 0.22, w: 8.3, h: 0.62, fontFace: PT.font, fontSize: 24, bold: true, color: PT.primary, align: 'left', valign: 'middle', margin: 0, fit: 'shrink' }, text: '' } },
+      ...(PT_LOGO ? [{ image: { data: PT_LOGO, x: 8.95, y: 0.28, w: 0.7, h: 0.41 } }] : []),
+      { text: { text: clip(foot, 80), options: { x: 2.0, y: 5.3, w: 7.65, h: 0.22, fontFace: PT.font, fontSize: 8, color: PT.muted, align: 'right', margin: 0 } } },
     ],
-    slideNumber: { x: 9.0, y: 5.27, w: 0.5, h: 0.25, fontFace: PT.font, fontSize: 9, color: PT.muted, align: 'right' },
+    slideNumber: { x: 0.35, y: 5.3, w: 0.5, h: 0.22, fontFace: PT.font, fontSize: 9, color: PT.dark, align: 'left' },
   });
   return pres;
 }
@@ -2220,9 +2238,47 @@ async function photoThumb(blob, aspect = 1, size = 640) {
   const d = c.toDataURL('image/jpeg', 0.85);
   return d.replace(/^data:/, '');
 }
+/* whole photo (crop applied, original aspect kept) as JPEG, long side ≤ max px */
+async function photoFull(blob, max = 1600) {
+  const bmp = await createImageBitmap(blob);
+  const k = Math.min(1, max / Math.max(bmp.width, bmp.height)), w = Math.round(bmp.width * k), h = Math.round(bmp.height * k);
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d'); ctx.imageSmoothingQuality = 'high'; ctx.drawImage(bmp, 0, 0, w, h);
+  bmp.close && bmp.close();
+  return { data: c.toDataURL('image/jpeg', 0.92).replace(/^data:/, ''), aspect: w / h };
+}
+/* biggest grid for n pictures of aspect a (w/h) inside W × H, with a caption under each */
+function bestGrid(n, a, W, H, cap = 0.3, gap = 0.15) {
+  let best = null;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const w = Math.min((W - gap * (cols - 1)) / cols, ((H - (cap + gap) * rows + gap) / rows) * a);
+    if (w > 0 && (!best || w > best.w + 1e-6)) best = { cols, rows, w, h: w / a };
+  }
+  return best;
+}
+/* lay a row-ordered list of photos ({data, aspect, day, date}) on a slide, as large as possible, centred; label drawn on the photo */
+function pPhotoGrid(slide, list, { x = 0.35, y = 1.17, W = 9.3, H = 4.08 } = {}) {
+  const gap = 0.12, asp = list.map(p => p.aspect).sort((p, q) => p - q)[Math.floor(list.length / 2)] || 4 / 3;
+  const g = bestGrid(list.length, asp, W, H, 0, gap);
+  const totW = g.cols * g.w + (g.cols - 1) * gap, totH = g.rows * g.h + (g.rows - 1) * gap;
+  const x0 = x + (W - totW) / 2, y0 = y + Math.max(0, (H - totH) / 2);
+  list.forEach((p, j) => {
+    const cx = x0 + (j % g.cols) * (g.w + gap), cy = y0 + Math.floor(j / g.cols) * (g.h + gap);
+    let ix = cx, iy = cy, iw = g.w, ih = g.h;
+    if (p.data) {   // fit the picture inside its cell without cropping
+      if (p.aspect >= asp) { ih = g.w / p.aspect; iy = cy + (g.h - ih) / 2; } else { iw = g.h * p.aspect; ix = cx + (g.w - iw) / 2; }
+      slide.addImage({ data: p.data, x: ix, y: iy, w: iw, h: ih });
+      slide.addShape('rect', { x: ix, y: iy, w: iw, h: ih, fill: { color: PT.white, transparency: 100 }, line: { color: PT.line, width: 0.75 } });
+    } else pPhoto(slide, null, cx, cy, g.w, g.h);
+    const lw = Math.min(iw - 0.1, 1.75), fs = g.w > 2.4 ? 12 : 10.5;
+    slide.addText([{ text: p.day != null ? `Day ${p.day}` : '', options: { bold: true, color: PT.primary } }, ...(p.date ? [{ text: '  ' + p.date, options: { color: PT.dark } }] : [])],
+      { x: ix + 0.06, y: iy + 0.06, w: lw, h: fs > 11 ? 0.3 : 0.26, fontFace: PT.font, fontSize: fs, fill: { color: PT.white, transparency: 12 }, valign: 'middle', isTextBox: true, margin: [0, 0.06, 0, 0.06], fit: 'shrink' });
+  });
+}
 function pPhoto(slide, data, x, y, w, h, frame, caption) {
   if (data) slide.addImage({ data, x, y, w, h, rounding: false });
-  else slide.addShape('rect', { x, y, w, h, fill: { color: 'F2F4F7' }, line: { color: PT.line, dashType: 'dash' } });
+  else slide.addShape('rect', { x, y, w, h, fill: { color: PT.grey }, line: { color: PT.line, dashType: 'dash' } });
   slide.addShape('rect', { x, y, w, h, fill: { color: PT.white, transparency: 100 }, line: { color: frame || PT.line, width: data ? 2.25 : 0.75 } });
   if (!data) slide.addText('no photo', { x, y: y + h / 2 - 0.15, w, h: 0.3, fontFace: PT.font, fontSize: 10, color: PT.muted, align: 'center', isTextBox: true, margin: 0 });
   if (caption) slide.addText(caption, { x, y: y + h + 0.03, w, h: 0.26, fontFace: PT.font, fontSize: 10, color: PT.text, align: 'left', isTextBox: true, margin: 0, fit: 'shrink' });
@@ -2267,7 +2323,7 @@ async function deckExperiment(PptxGenJS, id, withPhotos) {
       const sl = sContent(pres, sec, 'Chip map' + (arr.length > 1 ? ` (${k + 1}/${arr.length})` : ''));
       grp.forEach((c, j) => {
         const x = 0.5 + (j % 4) * 2.3, y = 1.05 + Math.floor(j / 4) * 1.9, w = 2.1, h = 1.75;
-        sl.addShape('roundRect', { x, y, w, h, rectRadius: 0.12, fill: { color: 'F4F7F8' }, line: { color: PT.line, width: 1 } });
+        sl.addShape('roundRect', { x, y, w, h, rectRadius: 0.12, fill: { color: PT.zebra }, line: { color: PT.line, width: 1 } });
         sl.addText([{ text: 'Chip ' + c.letter, options: { bold: true, color: PT.primary } }, { text: '  ' + clip(chipMixed(c) ? 'mixed conditions' : (condName(e, c) || 'no condition'), 22), options: { color: PT.muted } }],
           { x: x + 0.1, y: y + 0.06, w: w - 0.2, h: 0.3, fontFace: PT.font, fontSize: 11, isTextBox: true, margin: 0, valign: 'middle' });
         c.chambers.forEach((ch, i) => {
@@ -2361,27 +2417,23 @@ async function deckExperiment(PptxGenJS, id, withPhotos) {
     movs.sort((a, b) => a.date.localeCompare(b.date)).map(m => [fmtDateTime(m.date), clip(itemMap[m.itemId]?.name || 'deleted item', 40), `${fmtQty(-m.delta)} ${itemMap[m.itemId]?.unit || ''}`, clip(m.note, 40)]),
     { per: 12, empty: 'No consumables linked to this experiment.' });
 
-  // photos: one slide per day and per 4 chips (rows = chambers 1-3)
+  // photos: chip by chip (A1, A2, A3, B1 …); each chamber's photos side by side in increasing day order, as large as fits (≤ 6 per slide)
   if (withPhotos && photos.length) {
     sec = addSec(pres, 'Photos');
-    const days = [...new Set(photos.map(p => p.day))].sort((a, b) => a - b);
-    for (const d of days) {
-      const withP = chips.filter(c => photos.some(p => p.day === d && p.chipId === c.id));
-      for (const [k, grp] of chunk(withP, 4).entries()) {
-        const pages = Math.ceil(withP.length / 4);
-        const sl = sContent(pres, sec, `Day ${d}${e.seedingDate ? ' · ' + fmtDate(dateForDay(e.seedingDate, d)) : ''}${pages > 1 ? ` (${k + 1}/${pages})` : ''}`);
-        const size = 1.18;
-        for (const [j, c] of grp.entries()) {
-          const x = 0.5 + j * 2.3;
-          for (let n = 1; n <= 3; n++) {
-            const p = photos.find(q => q.day === d && q.chipId === c.id && q.chamber === n), stt = c.chambers[n - 1].status;
-            const y = 0.95 + (n - 1) * 1.45;
-            pPhoto(sl, p ? await photoThumb(photoBlob(p)) : null, x, y, size, size, ST_FILL[stt][1]);
-            sl.addText([{ text: c.letter + n, options: { bold: true, breakLine: true, fontSize: 12 } }, { text: clip(chCondName(e, c, n - 1), 24), options: { fontSize: 9, color: PT.muted, breakLine: true } },
-              { text: CH_STATUS[stt], options: { fontSize: 9, color: ST_FILL[stt][1], bold: true } }],
-              { x: x + size + 0.07, y, w: 2.3 - size - 0.15, h: size, fontFace: PT.font, color: PT.text, valign: 'top', isTextBox: true, margin: 0, fit: 'shrink' });
-          }
-        }
+    for (const c of chips) for (let n = 1; n <= 3; n++) {
+      const ph = photos.filter(q => q.chipId === c.id && q.chamber === n).sort((a, b) => a.day - b.day || String(a.date).localeCompare(String(b.date)));
+      if (!ph.length) continue;
+      const stt = c.chambers[n - 1].status, cond = chCondName(e, c, n - 1), pages = chunk(ph, 6);
+      for (const [k, grp] of pages.entries()) {
+        const sl = sContent(pres, sec, `Chip ${c.letter} · Chamber ${n}${pages.length > 1 ? ` (${k + 1}/${pages.length})` : ''}`);
+        sl.addText([
+          ...(cond ? [{ text: clip(cond, 70), options: { color: PT.dark, bold: true } }, { text: '   ·   ', options: { color: PT.line } }] : []),
+          { text: CH_STATUS[stt], options: { color: ST_FILL[stt][1], bold: true } },
+          ...(c.chambers[n - 1].failReason ? [{ text: '  – ' + clip(c.chambers[n - 1].failReason, 50), options: { color: PT.muted } }] : []),
+        ], { x: 0.35, y: 0.8, w: 9.3, h: 0.32, fontFace: PT.font, fontSize: 13, isTextBox: true, margin: 0, fit: 'shrink' });
+        const list = [];
+        for (const q of grp) list.push({ ...(await photoFull(photoBlob(q))), day: q.day, date: fmtDate(q.date || (e.seedingDate ? dateForDay(e.seedingDate, q.day) : '')) });
+        pPhotoGrid(sl, list);
       }
     }
   }
@@ -2413,13 +2465,13 @@ async function deckExpansion(PptxGenJS, id, withPhotos) {
     s = sContent(pres, sec, 'Growth across passages');
     const labels = done.map(r => pLabel(r.p));
     const axis = { catAxisLabelColor: PT.muted, valAxisLabelColor: PT.muted, catAxisLabelFontFace: PT.font, valAxisLabelFontFace: PT.font, catAxisLabelFontSize: 11, valAxisLabelFontSize: 10,
-      valGridLine: { color: 'E5EAEE', size: 0.75 }, catGridLine: { style: 'none' }, showLegend: true, legendPos: 'b', legendFontFace: PT.font, legendFontSize: 11,
+      valGridLine: { color: PT.grey, size: 0.75 }, catGridLine: { style: 'none' }, showLegend: true, legendPos: 'b', legendFontFace: PT.font, legendFontSize: 11,
       titleFontFace: PT.font, titleFontSize: 13, titleColor: PT.text, dataLabelFontFace: PT.font, dataLabelFontSize: 9, dataLabelColor: PT.text };
     s.addChart(pres.ChartType.line, [{ name: 'Raw', labels, values: done.map(r => +r.cpd.toFixed(2)) }, { name: 'Corrected', labels, values: done.map(r => +r.cpdC.toFixed(2)) }],
-      { x: 0.5, y: 1.0, w: 4.4, h: 4.1, showTitle: true, title: 'Cumulative population doublings', chartColors: [PT.primary, PT.low], lineSize: 2.5, lineDataSymbolSize: 8,
+      { x: 0.5, y: 1.0, w: 4.4, h: 4.1, showTitle: true, title: 'Cumulative population doublings', chartColors: [PT.primary, PT.muted], lineSize: 2.5, lineDataSymbolSize: 8,
         showValue: true, dataLabelPosition: 't', dataLabelFormatCode: '0.0', ...axis });
     s.addChart(pres.ChartType.bar, [{ name: 'Raw', labels, values: done.map(r => r.dt ? +r.dt.toFixed(1) : 0) }, { name: 'Corrected', labels, values: done.map(r => r.dtC ? +r.dtC.toFixed(1) : 0) }],
-      { x: 5.1, y: 1.0, w: 4.4, h: 4.1, barDir: 'col', barGrouping: 'clustered', showTitle: true, title: 'Doubling time per passage (h)', chartColors: [PT.primary, PT.low],
+      { x: 5.1, y: 1.0, w: 4.4, h: 4.1, barDir: 'col', barGrouping: 'clustered', showTitle: true, title: 'Doubling time per passage (h)', chartColors: [PT.primary, PT.muted],
         showValue: true, dataLabelPosition: 'outEnd', dataLabelFormatCode: '0', ...axis });
   }
 
@@ -2461,14 +2513,13 @@ async function deckExpansion(PptxGenJS, id, withPhotos) {
     sec = addSec(pres, 'Photos');
     for (const p of x.passages) for (const f of p.flasks) {
       const ph = photos.filter(q => q.chipId === f.id).sort((a, b) => a.day - b.day);
-      for (const [k, grp] of chunk(ph, 8).entries()) {
+      for (const [k, grp] of chunk(ph, 6).entries()) {
         if (!grp.length) continue;
-        const pages = Math.ceil(ph.length / 8);
+        const pages = Math.ceil(ph.length / 6);
         const sl = sContent(pres, sec, `${pLabel(p)} · ${f.name}${pages > 1 ? ` (${k + 1}/${pages})` : ''}`);
-        for (const [j, q] of grp.entries()) {
-          const xx = 0.5 + (j % 4) * 2.3, yy = 1.0 + Math.floor(j / 4) * 2.1, sz = 1.75;
-          pPhoto(sl, await photoThumb(photoBlob(q)), xx + 0.17, yy, sz, sz, PT.primary, `Day ${q.day} · ${fmtDate(q.date)}`);
-        }
+        const list = [];
+        for (const q of grp) list.push({ ...(await photoFull(photoBlob(q))), day: q.day, date: fmtDate(q.date) });
+        pPhotoGrid(sl, list, { y: 1.0, H: 4.25 });
       }
     }
   }
